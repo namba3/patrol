@@ -31,5 +31,5 @@ geckodriver --port=PORT  # when you use firefox
 ### Run patrol
 
 ```sh
-RUST_LOG=INFO ./target/release/patrol -c ./config.example.toml -d ./data.toml -p PORT
+RUST_LOG="patrol=DEBUG" ./target/release/patrol -c ./config.example.toml -d ./data.toml -p PORT
 ```
