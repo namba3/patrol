@@ -1,0 +1,10 @@
+
+[About]
+url = "https://github.com/namba3/patrol"
+selector = ".Layout-sidebar .BorderGrid-cell h2 + div"
+wait_seconds = 1
+
+[README]
+url = "https://github.com/namba3/patrol"
+selector = "#readme article"
+wait_seconds = 1
