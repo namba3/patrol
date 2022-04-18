@@ -1,7 +1,8 @@
 use futures_util::StreamExt;
-use log::warn;
+use log::{info, warn};
 
-use crate::domain;
+use super::DataRepositoryActor;
+use crate::domain::{self, DataRepository};
 
 pub struct App<ConfigRepository, DataRepository, Poller> {
     config_repo: ConfigRepository,
@@ -13,7 +14,7 @@ pub struct App<ConfigRepository, DataRepository, Poller> {
 impl<ConfigRepository, DataRepository, Poller> App<ConfigRepository, DataRepository, Poller>
 where
     ConfigRepository: domain::ConfigRepository,
-    DataRepository: domain::DataRepository,
+    DataRepository: domain::DataRepository + Send + 'static,
     Poller: domain::Poller,
 
     ConfigRepository::Error: std::error::Error,
@@ -38,11 +39,40 @@ where
         self,
     ) -> Result<(), Error<ConfigRepository::Error, DataRepository::Error, Poller::Error>> {
         let Self {
-            mut data_repo,
+            data_repo,
             mut config_repo,
             mut poller,
             period,
         } = self;
+
+        let data_repo = DataRepositoryActor::new(data_repo);
+        let mut data_repo = data_repo.start().await;
+        {
+            let mut data_repo = data_repo.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(period);
+                loop {
+                    let _ = interval.tick().await;
+
+                    let data_map = data_repo.get_all().await;
+                    let data_map = match data_map {
+                        Ok(x) => x,
+                        Err(why) => {
+                            warn!("{why}");
+                            continue;
+                        }
+                    };
+                    let mut data_list: Vec<_> = data_map.into_iter().collect();
+                    data_list.sort_by_key(|x| x.1.last_updated.clone());
+                    for (key, last_updated) in data_list
+                        .into_iter()
+                        .filter_map(|x| x.1.last_updated.map(|l| (x.0, l)))
+                    {
+                        info!("[{key}]: last_updated: {last_updated}");
+                    }
+                }
+            });
+        }
 
         let mut interval = tokio::time::interval(period);
 

@@ -75,7 +75,8 @@ impl DataRepository for TomlDataRepository {
 
         let key = &key;
 
-        if content.trim_start().trim_end().len() <= 0 {
+        let content = content.trim_start().trim_end();
+        if content.len() <= 0 {
             warn!("[{key}]: ignore empty content.");
         } else {
             let hash = Hash::new(content.as_bytes());
@@ -107,8 +108,12 @@ pub enum Error {
     HashError(FromHashStrError),
 }
 impl Display for Error {
-    fn fmt(&self, _f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        todo!()
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::IoError(e) => f.write_fmt(format_args!("IO error: {e}")),
+            Error::TomlError(e) => f.write_fmt(format_args!("Toml error: {e}")),
+            Error::HashError(e) => f.write_fmt(format_args!("Hash error: {e}")),
+        }
     }
 }
 impl std::error::Error for Error {}

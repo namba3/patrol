@@ -31,6 +31,13 @@ struct Args {
         default_value_t = 9515
     )]
     webdriver_port: u16,
+    #[clap(
+        short('i'),
+        long,
+        help = r#"Specify the patrol interval in minutes\nIf omitted, 1 is used."#,
+        default_value_t = 1
+    )]
+    interval_minutes: u16,
 }
 
 #[tokio::main]
@@ -46,7 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let poller = SelectivePoller::new(full_mode_poller, simple_modepoller);
 
-    let interval_period_secs = 60;
+    let interval_period_secs = args.interval_minutes.max(1) as u64 * 60;
 
     let app = App::new(config_repo, data_repo, poller, interval_period_secs);
 
