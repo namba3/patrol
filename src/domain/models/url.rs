@@ -1,7 +1,6 @@
-use serde_derive::{Deserialize, Serialize};
 use std::fmt::Display;
 
-#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Url(String);
 impl Url {
     pub fn new(url: String) -> Result<Self, UrlParseError> {

@@ -1,7 +1,5 @@
-use std::{fmt::Display};
-
-use serde::{Serialize};
 use sha2::{Digest, Sha256};
+use std::fmt::Display;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Hash([u8; 32]);
@@ -53,7 +51,13 @@ impl Display for Hash {
     }
 }
 
-impl Serialize for Hash {
+impl From<[u8; 32]> for Hash {
+    fn from(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+}
+
+impl serde::Serialize for Hash {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
@@ -61,10 +65,35 @@ impl Serialize for Hash {
         serializer.serialize_str(&self.to_string())
     }
 }
+impl<'de> serde::Deserialize<'de> for Hash {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_str(HashVisitor)
+    }
+}
 
-impl From<[u8; 32]> for Hash {
-    fn from(bytes: [u8; 32]) -> Self {
-        Self(bytes)
+struct HashVisitor;
+impl<'de> serde::de::Visitor<'de> for HashVisitor {
+    type Value = Hash;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "hex digits of length 64")
+    }
+
+    fn visit_str<E>(self, s: &str) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        if let Ok(hash) = Hash::from_hash_str(s) {
+            Ok(hash)
+        } else {
+            Err(serde::de::Error::invalid_value(
+                serde::de::Unexpected::Str(s),
+                &self,
+            ))
+        }
     }
 }
 

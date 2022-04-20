@@ -1,8 +1,7 @@
 use futures_util::StreamExt;
 use log::{info, warn};
 
-use super::DataRepositoryActor;
-use crate::domain::{self, DataRepository};
+use crate::domain::{self, Duration, Timestamp};
 
 pub struct App<ConfigRepository, DataRepository, Poller> {
     config_repo: ConfigRepository,
@@ -39,40 +38,11 @@ where
         self,
     ) -> Result<(), Error<ConfigRepository::Error, DataRepository::Error, Poller::Error>> {
         let Self {
-            data_repo,
+            mut data_repo,
             mut config_repo,
             mut poller,
             period,
         } = self;
-
-        let data_repo = DataRepositoryActor::new(data_repo);
-        let mut data_repo = data_repo.start().await;
-        {
-            let mut data_repo = data_repo.clone();
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(period);
-                loop {
-                    let _ = interval.tick().await;
-
-                    let data_map = data_repo.get_all().await;
-                    let data_map = match data_map {
-                        Ok(x) => x,
-                        Err(why) => {
-                            warn!("{why}");
-                            continue;
-                        }
-                    };
-                    let mut data_list: Vec<_> = data_map.into_iter().collect();
-                    data_list.sort_by_key(|x| x.1.last_updated.clone());
-                    for (key, last_updated) in data_list
-                        .into_iter()
-                        .filter_map(|x| x.1.last_updated.map(|l| (x.0, l)))
-                    {
-                        info!("[{key}]: last_updated: {last_updated}");
-                    }
-                }
-            });
-        }
 
         let mut interval = tokio::time::interval(period);
 
@@ -99,6 +69,35 @@ where
                 if let Err(why) = data_repo.update(key.clone(), content).await {
                     warn!("[{key}]: {why}")
                 }
+            }
+
+            let data_map = data_repo.get_all().await;
+            let data_map = match data_map {
+                Ok(x) => x,
+                Err(why) => {
+                    warn!("{why}");
+                    continue;
+                }
+            };
+            let mut data_list: Vec<_> = data_map.into_iter().collect();
+            data_list.sort_by_key(|x| x.1.last_updated.clone());
+
+            let now = Timestamp::now();
+            let yesterday_now = now - Duration::from_days(1);
+
+            for (key, last_updated) in data_list
+                .into_iter()
+                .filter_map(|x| x.1.last_updated.map(|l| (x.0, l)))
+            {
+                let style = if yesterday_now < last_updated {
+                    ansi_term::Color::Fixed(15).bold()
+                } else {
+                    ansi_term::Color::Fixed(8).normal()
+                };
+                info!(
+                    "[{key}]: last_updated: {}",
+                    style.paint(&last_updated.to_string())
+                );
             }
         }
     }

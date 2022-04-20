@@ -1,20 +1,12 @@
 use std::{collections::HashMap, fmt::Display, io::SeekFrom};
 
 use log::{debug, info, warn};
-use serde_derive::Deserialize;
 use tokio::{
     fs::{File, OpenOptions},
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
 };
 
-use crate::domain::{data_repository::DataRepository, hash::FromHashStrError, Data, Hash};
-
-#[derive(Deserialize)]
-struct TomlData {
-    hash: Option<String>,
-    last_updated: Option<String>,
-    last_checked: Option<String>,
-}
+use crate::domain::{Data, DataRepository, Hash, Timestamp};
 
 pub struct TomlDataRepository {
     file: File,
@@ -32,27 +24,13 @@ impl TomlDataRepository {
         let mut toml = String::new();
         file.read_to_string(&mut toml).await?;
 
-        let toml_map: HashMap<String, TomlData> = toml::from_str(&toml)?;
+        let toml_map: HashMap<String, Data> = toml::from_str(&toml)?;
 
-        let mut map = HashMap::new();
-        for (key, toml_data) in toml_map.into_iter() {
-            let TomlData {
-                hash,
-                last_updated,
-                last_checked,
-            } = toml_data;
+        let map = toml_map
+            .into_iter()
+            .map(|(key, data)| (key, data))
+            .collect();
 
-            let hash = hash.map(|x| Hash::from_hash_str(&x)).transpose()?;
-
-            let _ = map.insert(
-                key,
-                Data {
-                    hash,
-                    last_checked,
-                    last_updated,
-                },
-            );
-        }
         Ok(Self { file, map })
     }
 }
@@ -68,7 +46,7 @@ impl DataRepository for TomlDataRepository {
     async fn update(&mut self, key: String, content: String) -> Result<(), Self::Error> {
         let Self { file, map } = self;
 
-        let now = chrono::Utc::now().format("%Y-%m-%dT%T%Z").to_string();
+        let now = Timestamp::now();
 
         let data = map.entry(key.clone()).or_insert_with(|| Default::default());
         data.last_checked = now.into();
@@ -83,16 +61,23 @@ impl DataRepository for TomlDataRepository {
 
             if data.hash.as_ref() != Some(&hash) {
                 data.last_updated = data.last_checked.clone();
-                info!("[{key}]: updated.");
+                info!(
+                    "[{key}]: {}",
+                    ansi_term::Color::Fixed(15).bold().paint("updated.")
+                );
             } else {
-                info!("[{key}]: not yet updated.");
+                info!(
+                    "[{key}]: {}",
+                    ansi_term::Color::Fixed(8).paint("not yet updated.")
+                );
             }
             data.hash = hash.into();
 
             debug!("[{key}]:\n{}", content);
         }
 
-        let toml = toml::to_string_pretty(map).unwrap();
+        let toml = toml::to_string_pretty(&map).unwrap();
+
         file.seek(SeekFrom::Start(0)).await?;
         file.set_len(0).await?;
         file.write_all(toml.as_bytes()).await?;
@@ -105,14 +90,12 @@ impl DataRepository for TomlDataRepository {
 pub enum Error {
     IoError(std::io::Error),
     TomlError(toml::de::Error),
-    HashError(FromHashStrError),
 }
 impl Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Error::IoError(e) => f.write_fmt(format_args!("IO error: {e}")),
             Error::TomlError(e) => f.write_fmt(format_args!("Toml error: {e}")),
-            Error::HashError(e) => f.write_fmt(format_args!("Hash error: {e}")),
         }
     }
 }
@@ -125,10 +108,5 @@ impl From<std::io::Error> for Error {
 impl From<toml::de::Error> for Error {
     fn from(e: toml::de::Error) -> Self {
         Error::TomlError(e)
-    }
-}
-impl From<FromHashStrError> for Error {
-    fn from(e: FromHashStrError) -> Self {
-        Error::HashError(e)
     }
 }

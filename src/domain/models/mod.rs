@@ -1,15 +1,16 @@
-use serde::Deserialize;
-use serde_derive::Serialize;
-
 pub mod hash;
 pub mod selector;
+pub mod timestamp;
 pub mod url;
 
 pub use self::hash::Hash;
 pub use self::selector::Selector;
+pub use self::timestamp::{Duration, Timestamp};
 pub use self::url::Url;
 
-#[derive(Serialize, Debug, Clone)]
+use serde_derive::{Deserialize, Serialize};
+
+#[derive(Debug, Clone)]
 pub struct Config {
     pub url: Url,
     pub selector: Selector,
@@ -17,14 +18,14 @@ pub struct Config {
     pub wait_seconds: Option<u16>,
 }
 
-#[derive(Serialize, Default, Debug, Clone)]
+#[derive(Deserialize, Serialize, Default, Debug, Clone)]
 pub struct Data {
     pub hash: Option<Hash>,
-    pub last_updated: Option<String>,
-    pub last_checked: Option<String>,
+    pub last_updated: Option<Timestamp>,
+    pub last_checked: Option<Timestamp>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Mode {
     Simple,
