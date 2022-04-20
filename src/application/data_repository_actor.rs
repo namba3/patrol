@@ -1,4 +1,7 @@
-use std::{collections::HashMap, fmt::Display};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::Display,
+};
 
 use crate::domain;
 use tokio::sync::{mpsc, oneshot};
@@ -18,12 +21,20 @@ where
         tokio::spawn(async move {
             while let Some(message) = rx_message.recv().await {
                 match message {
+                    Message::Get { tx, key } => {
+                        let result = self.inner.get(key).await;
+                        let _ = tx.send(result);
+                    }
+                    Message::GetMultiple { tx, keys } => {
+                        let result = self.inner.get_multiple(keys).await;
+                        let _ = tx.send(result);
+                    }
                     Message::GetAll { tx } => {
                         let result = self.inner.get_all().await;
                         let _ = tx.send(result);
                     }
-                    Message::UpdateSingle { tx, key, content } => {
-                        let result = self.inner.update_single(key, content).await;
+                    Message::Update { tx, key, content } => {
+                        let result = self.inner.update(key, content).await;
                         let _ = tx.send(result);
                     }
                     Message::UpdateMultiple { tx, map } => {
@@ -39,10 +50,18 @@ where
 }
 
 enum Message<E> {
+    Get {
+        tx: oneshot::Sender<Result<Option<domain::Data>, E>>,
+        key: String,
+    },
+    GetMultiple {
+        tx: oneshot::Sender<Result<HashMap<String, domain::Data>, E>>,
+        keys: HashSet<String>,
+    },
     GetAll {
         tx: oneshot::Sender<Result<HashMap<String, domain::Data>, E>>,
     },
-    UpdateSingle {
+    Update {
         tx: oneshot::Sender<Result<(), E>>,
         key: String,
         content: String,
@@ -69,6 +88,33 @@ impl<DataRepository: domain::DataRepository> domain::DataRepository
 {
     type Error = Error<DataRepository::Error>;
 
+    async fn get(&mut self, key: String) -> Result<Option<domain::Data>, Self::Error> {
+        let (tx, rx) = oneshot::channel();
+        if let Err(_e) = self.tx_message.send(Message::Get { tx, key }) {
+            return Err(Error::ActorMessageError(ActorMessageError::SendError));
+        }
+
+        match rx.await {
+            Ok(result) => result.map_err(Error::DataRepositoryError),
+            Err(_e) => Err(Error::ActorMessageError(ActorMessageError::RecvError)),
+        }
+    }
+
+    async fn get_multiple(
+        &mut self,
+        keys: HashSet<String>,
+    ) -> Result<HashMap<String, domain::Data>, Self::Error> {
+        let (tx, rx) = oneshot::channel();
+        if let Err(_e) = self.tx_message.send(Message::GetMultiple { tx, keys }) {
+            return Err(Error::ActorMessageError(ActorMessageError::SendError));
+        }
+
+        match rx.await {
+            Ok(result) => result.map_err(Error::DataRepositoryError),
+            Err(_e) => Err(Error::ActorMessageError(ActorMessageError::RecvError)),
+        }
+    }
+
     async fn get_all(&mut self) -> Result<HashMap<String, domain::Data>, Self::Error> {
         let (tx, rx) = oneshot::channel();
         if let Err(_e) = self.tx_message.send(Message::GetAll { tx }) {
@@ -81,12 +127,9 @@ impl<DataRepository: domain::DataRepository> domain::DataRepository
         }
     }
 
-    async fn update_single(&mut self, key: String, content: String) -> Result<(), Self::Error> {
+    async fn update(&mut self, key: String, content: String) -> Result<(), Self::Error> {
         let (tx, rx) = oneshot::channel();
-        if let Err(_e) = self
-            .tx_message
-            .send(Message::UpdateSingle { tx, key, content })
-        {
+        if let Err(_e) = self.tx_message.send(Message::Update { tx, key, content }) {
             return Err(Error::ActorMessageError(ActorMessageError::SendError));
         }
 

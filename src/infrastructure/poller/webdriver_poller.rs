@@ -43,7 +43,7 @@ impl Poller for WebDriverPoller {
     type Error = Error;
     type Stream = impl Stream<Item = (String, Result<String, Self::Error>)>;
 
-    async fn poll_single(&mut self, _key: String, config: Config) -> Result<String, Self::Error> {
+    async fn poll(&mut self, _key: String, config: Config) -> Result<String, Self::Error> {
         let Config {
             url,
             selector,

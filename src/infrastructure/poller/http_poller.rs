@@ -1,4 +1,4 @@
-use std::{collections::HashMap};
+use std::collections::HashMap;
 
 use futures_util::Stream;
 use reqwest::Client;
@@ -23,8 +23,8 @@ impl Poller for HttpPoller {
     type Error = reqwest::Error;
     type Stream = impl Stream<Item = (String, Result<String, Self::Error>)>;
 
-    async fn poll_single(&mut self, _key: String, config: Config) -> Result<String, Self::Error> {
-        poll_single(&self.client, config).await
+    async fn poll(&mut self, _key: String, config: Config) -> Result<String, Self::Error> {
+        poll(&self.client, config).await
     }
 
     async fn poll_multiple(&mut self, configs: HashMap<String, Config>) -> Self::Stream {
@@ -34,7 +34,7 @@ impl Poller for HttpPoller {
             let client = self.client.clone();
             let tx = tx.clone();
             tokio::spawn(async move {
-                let result = poll_single(&client, config).await;
+                let result = poll(&client, config).await;
                 let _ = tx.send((key, result));
             });
         }
@@ -48,7 +48,7 @@ impl Poller for HttpPoller {
     }
 }
 
-async fn poll_single(client: &Client, config: Config) -> Result<String, reqwest::Error> {
+async fn poll(client: &Client, config: Config) -> Result<String, reqwest::Error> {
     let Config { url, selector, .. } = config;
 
     let response = client.get(url.as_str()).send().await?;

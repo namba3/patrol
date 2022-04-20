@@ -40,14 +40,14 @@ where
     type Error = Error<FullModePoller::Error, SimpleModePoller::Error>;
     type Stream = impl Stream<Item = (String, Result<String, Self::Error>)>;
 
-    async fn poll_single(&mut self, key: String, config: Config) -> Result<String, Self::Error> {
+    async fn poll(&mut self, key: String, config: Config) -> Result<String, Self::Error> {
         match config.mode {
             Mode::Full => {
-                let result = self.full_mode_poller.poll_single(key, config).await;
+                let result = self.full_mode_poller.poll(key, config).await;
                 result.map_err(Error::FullModePollerError)
             }
             Mode::Simple => {
-                let result = self.simple_mode_poller.poll_single(key, config).await;
+                let result = self.simple_mode_poller.poll(key, config).await;
                 result.map_err(Error::SimpleModePollerError)
             }
         }

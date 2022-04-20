@@ -1,4 +1,8 @@
-use std::{collections::HashMap, fmt::Display, io::SeekFrom};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::Display,
+    io::SeekFrom,
+};
 
 use log::{debug, info, warn};
 use tokio::{
@@ -102,11 +106,27 @@ impl TomlDataRepository {
 impl DataRepository for TomlDataRepository {
     type Error = std::io::Error;
 
+    async fn get(&mut self, key: String) -> Result<Option<Data>, Self::Error> {
+        let data = self.map.get(&key).map(|x| x.clone());
+        Ok(data)
+    }
+
+    async fn get_multiple(
+        &mut self,
+        keys: HashSet<String>,
+    ) -> Result<HashMap<String, Data>, Self::Error> {
+        let iter = keys.into_iter().filter_map(|key| {
+            let data = self.map.get(&key);
+            data.map(|data| (key, data.clone()))
+        });
+        Ok(iter.collect())
+    }
+
     async fn get_all(&mut self) -> Result<HashMap<String, Data>, Self::Error> {
         Ok(self.map.clone())
     }
 
-    async fn update_single(&mut self, key: String, content: String) -> Result<(), Self::Error> {
+    async fn update(&mut self, key: String, content: String) -> Result<(), Self::Error> {
         let now = Timestamp::now();
         let restore_info = self.update_map(key, content, now);
 
