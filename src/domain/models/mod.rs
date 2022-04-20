@@ -18,11 +18,11 @@ pub struct Config {
     pub wait_seconds: Option<u16>,
 }
 
-#[derive(Deserialize, Serialize, Default, Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct Data {
     pub hash: Option<Hash>,
     pub last_updated: Option<Timestamp>,
-    pub last_checked: Option<Timestamp>,
+    pub last_checked: Timestamp,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]

@@ -22,8 +22,12 @@ where
                         let result = self.inner.get_all().await;
                         let _ = tx.send(result);
                     }
-                    Message::Update { tx, key, content } => {
-                        let result = self.inner.update(key, content).await;
+                    Message::UpdateSingle { tx, key, content } => {
+                        let result = self.inner.update_single(key, content).await;
+                        let _ = tx.send(result);
+                    }
+                    Message::UpdateMultiple { tx, map } => {
+                        let result = self.inner.update_multiple(map).await;
                         let _ = tx.send(result);
                     }
                 }
@@ -38,10 +42,14 @@ enum Message<E> {
     GetAll {
         tx: oneshot::Sender<Result<HashMap<String, domain::Data>, E>>,
     },
-    Update {
+    UpdateSingle {
         tx: oneshot::Sender<Result<(), E>>,
         key: String,
         content: String,
+    },
+    UpdateMultiple {
+        tx: oneshot::Sender<Result<(), E>>,
+        map: HashMap<String, String>,
     },
 }
 
@@ -73,9 +81,24 @@ impl<DataRepository: domain::DataRepository> domain::DataRepository
         }
     }
 
-    async fn update(&mut self, key: String, content: String) -> Result<(), Self::Error> {
+    async fn update_single(&mut self, key: String, content: String) -> Result<(), Self::Error> {
         let (tx, rx) = oneshot::channel();
-        if let Err(_e) = self.tx_message.send(Message::Update { tx, key, content }) {
+        if let Err(_e) = self
+            .tx_message
+            .send(Message::UpdateSingle { tx, key, content })
+        {
+            return Err(Error::ActorMessageError(ActorMessageError::SendError));
+        }
+
+        match rx.await {
+            Ok(result) => result.map_err(Error::DataRepositoryError),
+            Err(_e) => Err(Error::ActorMessageError(ActorMessageError::RecvError)),
+        }
+    }
+
+    async fn update_multiple(&mut self, map: HashMap<String, String>) -> Result<(), Self::Error> {
+        let (tx, rx) = oneshot::channel();
+        if let Err(_e) = self.tx_message.send(Message::UpdateMultiple { tx, map }) {
             return Err(Error::ActorMessageError(ActorMessageError::SendError));
         }
 

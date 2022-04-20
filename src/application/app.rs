@@ -66,7 +66,7 @@ where
                     }
                 };
 
-                if let Err(why) = data_repo.update(key.clone(), content).await {
+                if let Err(why) = data_repo.update_single(key.clone(), content).await {
                     warn!("[{key}]: {why}")
                 }
             }
