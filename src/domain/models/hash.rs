@@ -86,13 +86,12 @@ impl<'de> serde::de::Visitor<'de> for HashVisitor {
     where
         E: serde::de::Error,
     {
-        if let Ok(hash) = Hash::from_hash_str(s) {
-            Ok(hash)
-        } else {
-            Err(serde::de::Error::invalid_value(
+        match Hash::from_hash_str(s) {
+            Ok(x) => Ok(x),
+            Err(_e) => Err(serde::de::Error::invalid_value(
                 serde::de::Unexpected::Str(s),
                 &self,
-            ))
+            )),
         }
     }
 }

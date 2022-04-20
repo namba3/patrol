@@ -13,8 +13,8 @@ use crate::domain::{
 
 #[derive(Deserialize)]
 struct TomlConfig {
-    url: String,
-    selector: String,
+    url: Url,
+    selector: Selector,
     mode: Option<Mode>,
     wait_seconds: Option<u16>,
 }
@@ -39,10 +39,14 @@ impl TomlConfigRepository {
 
         let mut map = HashMap::new();
         for (key, toml_config) in toml_map.into_iter() {
-            let url = Url::new(toml_config.url)?;
-            let selector = Selector::new(toml_config.selector)?;
-            let mode = toml_config.mode.unwrap_or_default();
-            let wait_seconds = toml_config.wait_seconds;
+            let TomlConfig {
+                url,
+                selector,
+                mode,
+                wait_seconds,
+            } = toml_config;
+            let mode = mode.unwrap_or_default();
+            let wait_seconds = wait_seconds;
             let _ = map.insert(
                 key,
                 Config {

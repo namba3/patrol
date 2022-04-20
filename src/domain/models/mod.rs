@@ -10,7 +10,7 @@ pub use self::url::Url;
 
 use serde_derive::{Deserialize, Serialize};
 
-#[derive(Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct Config {
     pub url: Url,
     pub selector: Selector,

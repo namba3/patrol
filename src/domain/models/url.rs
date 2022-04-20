@@ -1,6 +1,9 @@
+use serde::Deserialize;
+use serde_derive::Serialize;
+
 use std::fmt::Display;
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Serialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Url(String);
 impl Url {
     pub fn new(url: String) -> Result<Self, UrlParseError> {
@@ -21,6 +24,36 @@ impl Into<String> for Url {
 impl AsRef<str> for Url {
     fn as_ref(&self) -> &str {
         self.as_str()
+    }
+}
+impl<'de> Deserialize<'de> for Url {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_str(UrlVisitor)
+    }
+}
+
+struct UrlVisitor;
+impl<'de> serde::de::Visitor<'de> for UrlVisitor {
+    type Value = Url;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "valid URL")
+    }
+
+    fn visit_str<E>(self, s: &str) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        match Url::new(s.to_owned()) {
+            Ok(x) => Ok(x),
+            Err(_e) => Err(serde::de::Error::invalid_value(
+                serde::de::Unexpected::Str(s),
+                &self,
+            )),
+        }
     }
 }
 
