@@ -4,7 +4,7 @@ use futures_util::Stream;
 use reqwest::Client;
 use scraper::Html;
 
-use crate::domain::{Config, Poller};
+use crate::domain::{Config, Id, Poller};
 
 #[derive(Debug)]
 pub struct HttpPoller {
@@ -21,13 +21,13 @@ impl HttpPoller {
 #[async_trait::async_trait]
 impl Poller for HttpPoller {
     type Error = reqwest::Error;
-    type Stream = impl Stream<Item = (String, Result<String, Self::Error>)>;
+    type Stream = impl Stream<Item = (Id, Result<String, Self::Error>)>;
 
-    async fn poll(&mut self, _key: String, config: Config) -> Result<String, Self::Error> {
+    async fn poll(&mut self, _id: Id, config: Config) -> Result<String, Self::Error> {
         poll(&self.client, config).await
     }
 
-    async fn poll_multiple(&mut self, configs: HashMap<String, Config>) -> Self::Stream {
+    async fn poll_multiple(&mut self, configs: HashMap<Id, Config>) -> Self::Stream {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
         for (key, config) in configs.into_iter() {

@@ -1,7 +1,7 @@
 use sha2::{Digest, Sha256};
 use std::fmt::Display;
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Hash([u8; 32]);
 
 impl Hash {

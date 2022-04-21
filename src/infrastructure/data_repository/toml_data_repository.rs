@@ -10,11 +10,11 @@ use tokio::{
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
 };
 
-use crate::domain::{Data, DataRepository, Hash, Timestamp};
+use crate::domain::{Data, DataRepository, Hash, Id, Timestamp};
 
 pub struct TomlDataRepository {
     file: File,
-    map: HashMap<String, Data>,
+    map: HashMap<Id, Data>,
 }
 impl TomlDataRepository {
     pub async fn new(path: &str) -> Result<Self, Error> {
@@ -28,7 +28,7 @@ impl TomlDataRepository {
         let mut toml = String::new();
         file.read_to_string(&mut toml).await?;
 
-        let map: HashMap<String, Data> = toml::from_str(&toml)?;
+        let map: HashMap<Id, Data> = toml::from_str(&toml)?;
 
         Ok(Self { file, map })
     }
@@ -45,10 +45,10 @@ impl TomlDataRepository {
     }
 
     // Updates the inner hashmap and returns the old element.
-    fn update_map(&mut self, key: String, content: String, now: Timestamp) -> RestoreInfo {
+    fn update_map(&mut self, id: Id, content: String, now: Timestamp) -> RestoreInfo {
         let mut data = self
             .map
-            .get_mut(&key)
+            .get_mut(&id)
             .map(|x| x.clone())
             .unwrap_or_else(|| Data {
                 hash: None,
@@ -61,42 +61,39 @@ impl TomlDataRepository {
         let content = content.trim_start().trim_end();
 
         if content.len() <= 0 {
-            warn!("[{key}]: ignore empty content.");
+            warn!("[{id}]: ignore empty content.");
         } else {
             let hash = Hash::new(content.as_bytes());
 
             if data.hash.as_ref() != Some(&hash) {
                 data.last_updated = now.into();
                 info!(
-                    "[{key}]: {}",
+                    "[{id}]: {}",
                     ansi_term::Color::Fixed(15).bold().paint("updated.")
                 );
             } else {
                 info!(
-                    "[{key}]: {}",
+                    "[{id}]: {}",
                     ansi_term::Color::Fixed(8).paint("not yet updated.")
                 );
             }
             data.hash = hash.into();
 
-            debug!("[{key}]:\n{}", content);
+            debug!("[{id}]:\n{}", content);
         }
 
-        let old_data = self.map.insert(key.clone(), data);
-        RestoreInfo {
-            key,
-            data: old_data,
-        }
+        let old_data = self.map.insert(id.clone(), data);
+        RestoreInfo { id, data: old_data }
     }
 
     fn restore(&mut self, restore_info: RestoreInfo) {
-        let RestoreInfo { key, data } = restore_info;
+        let RestoreInfo { id, data } = restore_info;
         match data {
             Some(data) => {
-                let _ = self.map.insert(key, data);
+                let _ = self.map.insert(id, data);
             }
             None => {
-                let _ = self.map.remove(&key);
+                let _ = self.map.remove(&id);
             }
         }
     }
@@ -106,29 +103,26 @@ impl TomlDataRepository {
 impl DataRepository for TomlDataRepository {
     type Error = std::io::Error;
 
-    async fn get(&mut self, key: String) -> Result<Option<Data>, Self::Error> {
-        let data = self.map.get(&key).map(|x| x.clone());
+    async fn get(&mut self, id: Id) -> Result<Option<Data>, Self::Error> {
+        let data = self.map.get(&id).map(|x| x.clone());
         Ok(data)
     }
 
-    async fn get_multiple(
-        &mut self,
-        keys: HashSet<String>,
-    ) -> Result<HashMap<String, Data>, Self::Error> {
-        let iter = keys.into_iter().filter_map(|key| {
-            let data = self.map.get(&key);
-            data.map(|data| (key, data.clone()))
+    async fn get_multiple(&mut self, ids: HashSet<Id>) -> Result<HashMap<Id, Data>, Self::Error> {
+        let iter = ids.into_iter().filter_map(|id| {
+            let data = self.map.get(&id);
+            data.map(|data| (id, data.clone()))
         });
         Ok(iter.collect())
     }
 
-    async fn get_all(&mut self) -> Result<HashMap<String, Data>, Self::Error> {
+    async fn get_all(&mut self) -> Result<HashMap<Id, Data>, Self::Error> {
         Ok(self.map.clone())
     }
 
-    async fn update(&mut self, key: String, content: String) -> Result<(), Self::Error> {
+    async fn update(&mut self, id: Id, content: String) -> Result<(), Self::Error> {
         let now = Timestamp::now();
-        let restore_info = self.update_map(key, content, now);
+        let restore_info = self.update_map(id, content, now);
 
         if let Err(e) = self.save().await {
             self.restore(restore_info);
@@ -138,12 +132,12 @@ impl DataRepository for TomlDataRepository {
         }
     }
 
-    async fn update_multiple(&mut self, map: HashMap<String, String>) -> Result<(), Self::Error> {
+    async fn update_multiple(&mut self, map: HashMap<Id, String>) -> Result<(), Self::Error> {
         let now = Timestamp::now();
 
         let mut restore_infos = Vec::with_capacity(map.len());
-        for (key, content) in map.into_iter() {
-            let restore_info = self.update_map(key, content, now);
+        for (id, content) in map.into_iter() {
+            let restore_info = self.update_map(id, content, now);
             restore_infos.push(restore_info);
         }
 
@@ -159,7 +153,7 @@ impl DataRepository for TomlDataRepository {
 }
 
 struct RestoreInfo {
-    key: String,
+    id: Id,
     data: Option<Data>,
 }
 

@@ -8,7 +8,7 @@ use tokio::{
 
 use crate::domain::{
     config_repository::ConfigRepository, selector::SelectorParseError, url::UrlParseError, Config,
-    Mode, Selector, Url,
+    Id, Mode, Selector, Url,
 };
 
 #[derive(Deserialize)]
@@ -21,7 +21,7 @@ struct TomlConfig {
 
 pub struct TomlConfigRepository {
     file: File,
-    map: HashMap<String, Config>,
+    map: HashMap<Id, Config>,
 }
 impl TomlConfigRepository {
     pub async fn new(path: &str) -> Result<Self, Error> {
@@ -35,10 +35,10 @@ impl TomlConfigRepository {
         let mut toml = String::new();
         file.read_to_string(&mut toml).await?;
 
-        let toml_map: HashMap<String, TomlConfig> = toml::from_str(&toml)?;
+        let toml_map: HashMap<Id, TomlConfig> = toml::from_str(&toml)?;
 
         let mut map = HashMap::new();
-        for (key, toml_config) in toml_map.into_iter() {
+        for (id, toml_config) in toml_map.into_iter() {
             let TomlConfig {
                 url,
                 selector,
@@ -48,7 +48,7 @@ impl TomlConfigRepository {
             let mode = mode.unwrap_or_default();
             let wait_seconds = wait_seconds;
             let _ = map.insert(
-                key,
+                id,
                 Config {
                     url,
                     selector,
@@ -66,7 +66,7 @@ impl TomlConfigRepository {
 impl ConfigRepository for TomlConfigRepository {
     type Error = std::io::Error;
 
-    async fn get_all(&mut self) -> Result<HashMap<String, Config>, Self::Error> {
+    async fn get_all(&mut self) -> Result<HashMap<Id, Config>, Self::Error> {
         Ok(self.map.clone())
     }
 }

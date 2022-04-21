@@ -3,7 +3,7 @@ use serde_derive::Serialize;
 
 use std::fmt::Display;
 
-#[derive(Serialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Serialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Url(String);
 impl Url {
     pub fn new(url: String) -> Result<Self, UrlParseError> {

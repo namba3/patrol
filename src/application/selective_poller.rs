@@ -2,7 +2,7 @@ use std::{collections::HashMap, fmt::Display};
 
 use futures_util::{Stream, StreamExt};
 
-use crate::domain::{Config, Mode, Poller};
+use crate::domain::{Config, Id, Mode, Poller};
 
 use crate::domain;
 
@@ -38,32 +38,32 @@ where
     SimpleModePoller::Stream: Send,
 {
     type Error = Error<FullModePoller::Error, SimpleModePoller::Error>;
-    type Stream = impl Stream<Item = (String, Result<String, Self::Error>)>;
+    type Stream = impl Stream<Item = (Id, Result<String, Self::Error>)>;
 
-    async fn poll(&mut self, key: String, config: Config) -> Result<String, Self::Error> {
+    async fn poll(&mut self, id: Id, config: Config) -> Result<String, Self::Error> {
         match config.mode {
             Mode::Full => {
-                let result = self.full_mode_poller.poll(key, config).await;
+                let result = self.full_mode_poller.poll(id, config).await;
                 result.map_err(Error::FullModePollerError)
             }
             Mode::Simple => {
-                let result = self.simple_mode_poller.poll(key, config).await;
+                let result = self.simple_mode_poller.poll(id, config).await;
                 result.map_err(Error::SimpleModePollerError)
             }
         }
     }
 
-    async fn poll_multiple(&mut self, configs: HashMap<String, Config>) -> Self::Stream {
+    async fn poll_multiple(&mut self, configs: HashMap<Id, Config>) -> Self::Stream {
         let mut full_mode_configs = HashMap::new();
         let mut simple_mode_configs = HashMap::new();
 
-        for (key, config) in configs.into_iter() {
+        for (id, config) in configs.into_iter() {
             match config.mode {
                 Mode::Full => {
-                    let _ = full_mode_configs.insert(key, config);
+                    let _ = full_mode_configs.insert(id, config);
                 }
                 Mode::Simple => {
-                    let _ = simple_mode_configs.insert(key, config);
+                    let _ = simple_mode_configs.insert(id, config);
                 }
             }
         }
@@ -80,8 +80,8 @@ where
 
             loop {
                 let result = tokio::select! {
-                    Some((key, x)) = full_mode_stream.next() => (key, x.map_err(Error::FullModePollerError)),
-                    Some((key, x)) = simple_mode_stream.next() => (key, x.map_err(Error::SimpleModePollerError)),
+                    Some((id, x)) = full_mode_stream.next() => (id, x.map_err(Error::FullModePollerError)),
+                    Some((id, x)) = simple_mode_stream.next() => (id, x.map_err(Error::SimpleModePollerError)),
                     else => break,
                 };
 

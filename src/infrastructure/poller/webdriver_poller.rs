@@ -3,7 +3,7 @@ use std::{collections::HashMap, fmt::Display};
 use fantoccini::{Client, ClientBuilder, Locator};
 use futures_util::Stream;
 
-use crate::domain::{Config, Poller};
+use crate::domain::{Config, Id, Poller};
 
 use serde_json::{json, Map, Value};
 use std::lazy::SyncLazy;
@@ -41,9 +41,9 @@ impl WebDriverPoller {
 #[async_trait::async_trait]
 impl Poller for WebDriverPoller {
     type Error = Error;
-    type Stream = impl Stream<Item = (String, Result<String, Self::Error>)>;
+    type Stream = impl Stream<Item = (Id, Result<String, Self::Error>)>;
 
-    async fn poll(&mut self, _key: String, config: Config) -> Result<String, Self::Error> {
+    async fn poll(&mut self, _id: Id, config: Config) -> Result<String, Self::Error> {
         let Config {
             url,
             selector,
@@ -58,7 +58,7 @@ impl Poller for WebDriverPoller {
         Ok(content)
     }
 
-    async fn poll_multiple(&mut self, configs: HashMap<String, Config>) -> Self::Stream {
+    async fn poll_multiple(&mut self, configs: HashMap<Id, Config>) -> Self::Stream {
         let mut client_pool = self.client_pool.clone();
 
         async_stream::stream! {

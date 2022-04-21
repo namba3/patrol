@@ -57,17 +57,17 @@ where
             let poll_stream = poller.poll_multiple(configs).await;
             tokio::pin!(poll_stream);
 
-            while let Some((key, result)) = poll_stream.next().await {
+            while let Some((id, result)) = poll_stream.next().await {
                 let content = match result {
                     Ok(x) => x,
                     Err(why) => {
-                        warn!("[{key}]: {why}");
+                        warn!("[{id}]: {why}");
                         continue;
                     }
                 };
 
-                if let Err(why) = data_repo.update(key.clone(), content).await {
-                    warn!("[{key}]: {why}")
+                if let Err(why) = data_repo.update(id.clone(), content).await {
+                    warn!("[{id}]: {why}")
                 }
             }
 
@@ -84,15 +84,16 @@ where
 
             let now = Timestamp::now();
             let yesterday_now = now - Duration::from_days(1);
+            let one_hour_ago = now - Duration::from_hours(1);
 
             for (key, last_updated) in data_list
                 .into_iter()
                 .filter_map(|x| x.1.last_updated.map(|l| (x.0, l)))
             {
-                let style = if yesterday_now < last_updated {
-                    ansi_term::Color::Fixed(15).bold()
-                } else {
-                    ansi_term::Color::Fixed(8).normal()
+                let style = match last_updated {
+                    _ if one_hour_ago < last_updated => ansi_term::Color::Fixed(15).bold(),
+                    _ if yesterday_now < last_updated => ansi_term::Color::Fixed(7).normal(),
+                    _ => ansi_term::Color::Fixed(8).normal(),
                 };
                 info!(
                     "[{key}]: last_updated: {}",

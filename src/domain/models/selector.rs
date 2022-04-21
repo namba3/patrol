@@ -3,7 +3,7 @@ use serde_derive::Serialize;
 
 use std::fmt::Display;
 
-#[derive(Serialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Serialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Selector(String);
 impl Selector {
     pub fn new(selector: String) -> Result<Self, SelectorParseError> {

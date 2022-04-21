@@ -1,9 +1,11 @@
 pub mod hash;
+pub mod id;
 pub mod selector;
 pub mod timestamp;
 pub mod url;
 
 pub use self::hash::Hash;
+pub use self::id::Id;
 pub use self::selector::Selector;
 pub use self::timestamp::{Duration, Timestamp};
 pub use self::url::Url;

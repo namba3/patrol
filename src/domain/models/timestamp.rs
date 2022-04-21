@@ -1,7 +1,7 @@
 use serde_derive::{Deserialize, Serialize};
 use std::fmt::Display;
 
-#[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Timestamp(chrono::NaiveDateTime);
 impl Timestamp {
     pub fn now() -> Self {
