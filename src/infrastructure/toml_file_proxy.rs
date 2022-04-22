@@ -14,18 +14,14 @@ impl<T> TomlFileProxy<T>
 where
     T: serde::de::DeserializeOwned + serde::Serialize,
 {
+    /// Create a new proxy to the toml file.
     pub async fn new(path: &str) -> Result<Self, Error> {
-        let mut file = OpenOptions::new()
+        let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .open(path)
             .await?;
-
-        let mut toml = String::new();
-        file.read_to_string(&mut toml).await?;
-
-        let _data: T = toml::from_str(&toml)?;
 
         Ok(Self { file, cache: None })
     }
@@ -33,6 +29,8 @@ where
     /// Load data from the file to cache, and returns the cached data
     pub async fn load(&mut self) -> Result<&T, Error> {
         let mut toml = String::new();
+
+        self.file.seek(SeekFrom::Start(0)).await?;
         self.file.read_to_string(&mut toml).await?;
 
         self.cache = toml::from_str::<T>(&toml)?.into();

@@ -1,5 +1,5 @@
 use futures_util::StreamExt;
-use log::{info, warn};
+use log::{debug, info, warn};
 
 use crate::domain::{self, Duration, Timestamp};
 
@@ -47,6 +47,7 @@ where
         let mut interval = tokio::time::interval(period);
 
         loop {
+            info!("waiting for next interval period...");
             let _ = interval.tick().await;
 
             let configs = config_repo

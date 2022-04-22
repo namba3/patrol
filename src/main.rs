@@ -45,6 +45,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     env_logger::Builder::from_env(Env::default().default_filter_or("warn")).init();
 
+    info!("config_path:      {}", args.config_path);
+    info!("data_path:        {}", args.data_path);
+    info!("interval_minutes: {}", args.interval_minutes);
+    info!("webdriver_ports:  {:?}", args.webdriver_ports);
+
     let config_repo = TomlConfigRepository::new(&args.config_path).await?;
     let data_repo = TomlDataRepository::new(&args.data_path).await?;
 
@@ -55,11 +60,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let interval_period_secs = args.interval_minutes.max(1) as u64 * 60;
 
+    info!("start app.");
     let app = App::new(config_repo, data_repo, poller, interval_period_secs);
-
-    info!("config_path:\t{}", args.config_path);
-    info!("data_path:\t{}", args.data_path);
-    info!("webdriver_ports:\t{:?}", args.webdriver_ports);
 
     if let Err(why) = app.run().await {
         error!("{why}")

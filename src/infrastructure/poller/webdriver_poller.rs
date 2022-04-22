@@ -2,6 +2,7 @@ use std::{collections::HashMap, fmt::Display};
 
 use fantoccini::{Client, ClientBuilder, Locator};
 use futures_util::Stream;
+use log::debug;
 
 use crate::domain::{Config, Id, Poller};
 
@@ -76,9 +77,11 @@ impl Poller for WebDriverPoller {
                 } = config;
                 let mut item = client_pool.get().await;
                 let client = item.client();
+                debug!("[{}]: start polling {}", &id, url.as_str());
                 let result = poll(client, url.as_str(), selector.as_str(), wait_seconds)
                     .await
                     .map_err(|e| Error::from(e));
+                debug!("[{}]: polling succeeded", &id);
                 let _ = tx.send((id, result));
             });
         }
@@ -107,6 +110,7 @@ impl ClientPool {
 
         for port in ports.into_iter() {
             let c = connect(*port).await?;
+            debug!("webdriver connected to {port}.");
             let _ = r.returning_port.send(c);
         }
 

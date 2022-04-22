@@ -1,5 +1,6 @@
 use std::{collections::HashMap, fmt::Display};
 
+use log::debug;
 use serde_derive::{Deserialize, Serialize};
 
 use crate::infrastructure::toml_file_proxy::{Error as TomlProxyError, TomlFileProxy};
@@ -54,8 +55,9 @@ pub struct TomlConfigRepository {
 }
 impl TomlConfigRepository {
     pub async fn new(path: &str) -> Result<Self, Error> {
-        let mut proxy = TomlFileProxy::new(path).await?;
-        proxy.load().await?;
+        let mut proxy = TomlFileProxy::<HashMap<Id, TomlConfig>>::new(path).await?;
+        let map = proxy.load().await?;
+        debug!("{} has {} configurations.", path, map.len());
 
         Ok(Self { proxy })
     }

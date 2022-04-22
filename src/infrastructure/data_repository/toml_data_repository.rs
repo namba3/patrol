@@ -11,8 +11,9 @@ pub struct TomlDataRepository {
 }
 impl TomlDataRepository {
     pub async fn new(path: &str) -> Result<Self, Error> {
-        let mut proxy = TomlFileProxy::new(path).await?;
-        proxy.load().await?;
+        let mut proxy = TomlFileProxy::<HashMap<Id, Data>>::new(path).await?;
+        let map = proxy.load().await?;
+        debug!("{} has {} data entries.", path, map.len());
 
         Ok(Self { proxy })
     }
