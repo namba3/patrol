@@ -86,7 +86,7 @@ where
             let yesterday_now = now - Duration::from_days(1);
             let one_hour_ago = now - Duration::from_hours(1);
 
-            for (key, last_updated) in data_list
+            for (id, last_updated) in data_list
                 .into_iter()
                 .filter_map(|x| x.1.last_updated.map(|l| (x.0, l)))
             {
@@ -96,7 +96,7 @@ where
                     _ => ansi_term::Color::Fixed(8).normal(),
                 };
                 info!(
-                    "[{key}]: last_updated: {}",
+                    "[{id}]: last_updated: {}",
                     style.paint(&last_updated.to_string())
                 );
             }

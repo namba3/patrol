@@ -27,14 +27,17 @@ static CAPABILITIES: SyncLazy<Map<String, Value>> = SyncLazy::new(|| {
 
 #[derive(Debug)]
 pub struct WebDriverPoller {
-    port: u16,
+    _ports: Vec<u16>,
     client_pool: ClientPool,
 }
 
 impl WebDriverPoller {
-    pub async fn new(port: u16) -> Result<Self, Error> {
-        let client_pool = ClientPool::new(&[port]).await?;
-        Ok(Self { port, client_pool })
+    pub async fn new(ports: &[u16]) -> Result<Self, Error> {
+        let client_pool = ClientPool::new(ports).await?;
+        Ok(Self {
+            _ports: ports.to_vec(),
+            client_pool,
+        })
     }
 }
 
@@ -59,16 +62,31 @@ impl Poller for WebDriverPoller {
     }
 
     async fn poll_multiple(&mut self, configs: HashMap<Id, Config>) -> Self::Stream {
-        let mut client_pool = self.client_pool.clone();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
-        async_stream::stream! {
-            for (key, config) in configs.into_iter() {
-                let Config { url, selector , wait_seconds, ..} = config;
+        for (id, config) in configs.into_iter() {
+            let mut client_pool = self.client_pool.clone();
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let Config {
+                    url,
+                    selector,
+                    wait_seconds,
+                    ..
+                } = config;
                 let mut item = client_pool.get().await;
                 let client = item.client();
+                let result = poll(client, url.as_str(), selector.as_str(), wait_seconds)
+                    .await
+                    .map_err(|e| Error::from(e));
+                let _ = tx.send((id, result));
+            });
+        }
+        drop(tx);
 
-                let result = poll(client, url.as_str(), selector.as_str(), wait_seconds).await.map_err(|e| Error::from(e));
-                yield (key, result);
+        async_stream::stream! {
+            while let Some(x) = rx.recv().await {
+                yield x;
             }
         }
     }

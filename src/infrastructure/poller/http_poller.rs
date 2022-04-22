@@ -30,12 +30,12 @@ impl Poller for HttpPoller {
     async fn poll_multiple(&mut self, configs: HashMap<Id, Config>) -> Self::Stream {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
-        for (key, config) in configs.into_iter() {
+        for (id, config) in configs.into_iter() {
             let client = self.client.clone();
             let tx = tx.clone();
             tokio::spawn(async move {
                 let result = poll(&client, config).await;
-                let _ = tx.send((key, result));
+                let _ = tx.send((id, result));
             });
         }
         drop(tx);
