@@ -11,4 +11,6 @@ pub trait DataRepository {
 
     async fn update(&mut self, id: Id, content: String) -> Result<(), Self::Error>;
     async fn update_multiple(&mut self, map: HashMap<Id, String>) -> Result<(), Self::Error>;
+
+    async fn delete(&mut self, id: Id) -> Result<Option<Data>, Self::Error>;
 }

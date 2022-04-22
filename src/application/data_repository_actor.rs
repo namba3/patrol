@@ -41,6 +41,10 @@ where
                         let result = self.inner.update_multiple(map).await;
                         let _ = tx.send(result);
                     }
+                    Message::Delete { tx, id } => {
+                        let result = self.inner.delete(id).await;
+                        let _ = tx.send(result);
+                    }
                 }
             }
         });
@@ -69,6 +73,10 @@ enum Message<E> {
     UpdateMultiple {
         tx: oneshot::Sender<Result<(), E>>,
         map: HashMap<Id, String>,
+    },
+    Delete {
+        tx: oneshot::Sender<Result<Option<domain::Data>, E>>,
+        id: Id,
     },
 }
 
@@ -142,6 +150,18 @@ impl<DataRepository: domain::DataRepository> domain::DataRepository
     async fn update_multiple(&mut self, map: HashMap<Id, String>) -> Result<(), Self::Error> {
         let (tx, rx) = oneshot::channel();
         if let Err(_e) = self.tx_message.send(Message::UpdateMultiple { tx, map }) {
+            return Err(Error::ActorMessageError(ActorMessageError::SendError));
+        }
+
+        match rx.await {
+            Ok(result) => result.map_err(Error::DataRepositoryError),
+            Err(_e) => Err(Error::ActorMessageError(ActorMessageError::RecvError)),
+        }
+    }
+
+    async fn delete(&mut self, id: Id) -> Result<Option<domain::Data>, Self::Error> {
+        let (tx, rx) = oneshot::channel();
+        if let Err(_e) = self.tx_message.send(Message::Delete { tx, id }) {
             return Err(Error::ActorMessageError(ActorMessageError::SendError));
         }
 
