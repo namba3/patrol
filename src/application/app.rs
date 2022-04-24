@@ -55,7 +55,7 @@ where
                 .await
                 .map_err(Error::ConfigRepositoryError)?;
 
-            let poll_stream = poller.poll_multiple(configs).await;
+            let poll_stream = poller.poll_multiple(configs.clone()).await;
             tokio::pin!(poll_stream);
 
             while let Some((id, result)) = poll_stream.next().await {
@@ -91,14 +91,17 @@ where
                 .into_iter()
                 .filter_map(|x| x.1.last_updated.map(|l| (x.0, l)))
             {
+                let config = configs.get(&id);
+                let url = config.map(|x| x.url.as_str()).unwrap_or("-");
+
                 let style = match last_updated {
                     _ if one_hour_ago < last_updated => ansi_term::Color::Fixed(15).bold(),
                     _ if yesterday_now < last_updated => ansi_term::Color::Fixed(7).normal(),
                     _ => ansi_term::Color::Fixed(8).normal(),
                 };
                 info!(
-                    "[{id}]: last_updated: {}",
-                    style.paint(&last_updated.to_string())
+                    "[{id}]: {}",
+                    style.paint(format!("last_updated: {last_updated}, url: {url}"))
                 );
             }
         }
