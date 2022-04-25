@@ -1,5 +1,5 @@
 use futures_util::StreamExt;
-use log::{debug, info, warn};
+use log::{info, warn};
 
 use crate::domain::{self, Duration, Timestamp};
 
