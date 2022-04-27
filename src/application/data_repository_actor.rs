@@ -33,8 +33,8 @@ where
                         let result = self.inner.get_all().await;
                         let _ = tx.send(result);
                     }
-                    Message::Update { tx, id, content } => {
-                        let result = self.inner.update(id, content).await;
+                    Message::Update { tx, id, hash } => {
+                        let result = self.inner.update(id, hash).await;
                         let _ = tx.send(result);
                     }
                     Message::UpdateMultiple { tx, map } => {
@@ -68,11 +68,11 @@ enum Message<E> {
     Update {
         tx: oneshot::Sender<Result<(), E>>,
         id: Id,
-        content: String,
+        hash: domain::Hash,
     },
     UpdateMultiple {
         tx: oneshot::Sender<Result<(), E>>,
-        map: HashMap<Id, String>,
+        map: HashMap<Id, domain::Hash>,
     },
     Delete {
         tx: oneshot::Sender<Result<Option<domain::Data>, E>>,
@@ -135,9 +135,9 @@ impl<DataRepository: domain::DataRepository> domain::DataRepository
         }
     }
 
-    async fn update(&mut self, id: Id, content: String) -> Result<(), Self::Error> {
+    async fn update(&mut self, id: Id, hash: domain::Hash) -> Result<(), Self::Error> {
         let (tx, rx) = oneshot::channel();
-        if let Err(_e) = self.tx_message.send(Message::Update { tx, id, content }) {
+        if let Err(_e) = self.tx_message.send(Message::Update { tx, id, hash }) {
             return Err(Error::ActorMessageError(ActorMessageError::SendError));
         }
 
@@ -147,7 +147,7 @@ impl<DataRepository: domain::DataRepository> domain::DataRepository
         }
     }
 
-    async fn update_multiple(&mut self, map: HashMap<Id, String>) -> Result<(), Self::Error> {
+    async fn update_multiple(&mut self, map: HashMap<Id, domain::Hash>) -> Result<(), Self::Error> {
         let (tx, rx) = oneshot::channel();
         if let Err(_e) = self.tx_message.send(Message::UpdateMultiple { tx, map }) {
             return Err(Error::ActorMessageError(ActorMessageError::SendError));

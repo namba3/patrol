@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use log::{debug, info, warn};
+use log::{debug, info};
 
 use crate::infrastructure::toml_file_proxy::{Error, TomlFileProxy};
 
@@ -19,7 +19,7 @@ impl TomlDataRepository {
     }
 
     // Updates the inner hashmap and returns the old element.
-    fn update_map(&mut self, id: Id, content: String, now: Timestamp) -> RestoreInfo {
+    fn update_map(&mut self, id: Id, hash: Hash, now: Timestamp) -> RestoreInfo {
         let mut data = self
             .proxy
             .get_cache_mut()
@@ -34,29 +34,19 @@ impl TomlDataRepository {
 
         data.last_checked = now;
 
-        let content = content.trim_start().trim_end();
-
-        if content.len() <= 0 {
-            warn!("[{id}]: ignore empty content.");
+        if data.hash.as_ref() != Some(&hash) {
+            data.last_updated = now.into();
+            info!(
+                "[{id}]: {}",
+                ansi_term::Color::Fixed(15).bold().paint("updated.")
+            );
         } else {
-            let hash = Hash::new(content.as_bytes());
-
-            if data.hash.as_ref() != Some(&hash) {
-                data.last_updated = now.into();
-                info!(
-                    "[{id}]: {}",
-                    ansi_term::Color::Fixed(15).bold().paint("updated.")
-                );
-            } else {
-                info!(
-                    "[{id}]: {}",
-                    ansi_term::Color::Fixed(8).paint("not yet updated.")
-                );
-            }
-            data.hash = hash.into();
-
-            debug!("[{id}]:\n{}", content);
+            info!(
+                "[{id}]: {}",
+                ansi_term::Color::Fixed(8).paint("not yet updated.")
+            );
         }
+        data.hash = hash.into();
 
         let old_data = self.proxy.get_cache_mut().unwrap().insert(id.clone(), data);
         RestoreInfo { id, data: old_data }
@@ -108,9 +98,9 @@ impl DataRepository for TomlDataRepository {
         Ok(map)
     }
 
-    async fn update(&mut self, id: Id, content: String) -> Result<(), Self::Error> {
+    async fn update(&mut self, id: Id, hash: Hash) -> Result<(), Self::Error> {
         let now = Timestamp::now();
-        let restore_info = self.update_map(id, content, now);
+        let restore_info = self.update_map(id, hash, now);
 
         if let Err(e) = self.proxy.save().await {
             self.restore(restore_info);
@@ -120,12 +110,12 @@ impl DataRepository for TomlDataRepository {
         }
     }
 
-    async fn update_multiple(&mut self, map: HashMap<Id, String>) -> Result<(), Self::Error> {
+    async fn update_multiple(&mut self, map: HashMap<Id, Hash>) -> Result<(), Self::Error> {
         let now = Timestamp::now();
 
         let mut restore_infos = Vec::with_capacity(map.len());
-        for (id, content) in map.into_iter() {
-            let restore_info = self.update_map(id, content, now);
+        for (id, hash) in map.into_iter() {
+            let restore_info = self.update_map(id, hash, now);
             restore_infos.push(restore_info);
         }
 

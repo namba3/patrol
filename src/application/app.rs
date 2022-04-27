@@ -1,5 +1,5 @@
 use futures_util::StreamExt;
-use log::{info, warn};
+use log::{debug, info, warn};
 
 use crate::domain::{self, Duration, Timestamp};
 
@@ -55,21 +55,41 @@ where
                 .await
                 .map_err(Error::ConfigRepositoryError)?;
 
-            let poll_stream = poller.poll_multiple(configs.clone()).await;
-            tokio::pin!(poll_stream);
+            let mut rem = configs.clone();
+            let mut retry = 3;
 
-            while let Some((id, result)) = poll_stream.next().await {
-                let content = match result {
-                    Ok(x) => x,
-                    Err(why) => {
-                        warn!("[{id}]: {why}");
+            while 0 < rem.len() && 0 < retry {
+                let poll_stream = poller.poll_multiple(rem.clone()).await;
+                tokio::pin!(poll_stream);
+
+                while let Some((id, result)) = poll_stream.next().await {
+                    let content = match result {
+                        Ok(x) => x,
+                        Err(why) => {
+                            warn!("[{id}]: {why}");
+                            continue;
+                        }
+                    };
+
+                    let content = content.trim_start().trim_end();
+
+                    if content.len() <= 0 {
+                        warn!("[{id}]: ignore empty content.");
                         continue;
                     }
-                };
 
-                if let Err(why) = data_repo.update(id.clone(), content).await {
-                    warn!("[{id}]: {why}")
+                    debug!("[{id}]:\n{}", content);
+
+                    let hash = domain::Hash::new(content.as_bytes());
+
+                    if let Err(why) = data_repo.update(id.clone(), hash).await {
+                        warn!("[{id}]: {why}")
+                    }
+
+                    let _ = rem.remove(&id);
                 }
+
+                retry -= 1;
             }
 
             let data_map = data_repo.get_all().await;

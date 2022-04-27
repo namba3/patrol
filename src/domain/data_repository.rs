@@ -1,4 +1,4 @@
-use crate::domain::{Data, Id};
+use crate::domain::{Data, Hash, Id};
 use std::collections::{HashMap, HashSet};
 
 #[async_trait::async_trait]
@@ -9,8 +9,8 @@ pub trait DataRepository {
     async fn get_multiple(&mut self, ids: HashSet<Id>) -> Result<HashMap<Id, Data>, Self::Error>;
     async fn get_all(&mut self) -> Result<HashMap<Id, Data>, Self::Error>;
 
-    async fn update(&mut self, id: Id, content: String) -> Result<(), Self::Error>;
-    async fn update_multiple(&mut self, map: HashMap<Id, String>) -> Result<(), Self::Error>;
+    async fn update(&mut self, id: Id, hash: Hash) -> Result<(), Self::Error>;
+    async fn update_multiple(&mut self, map: HashMap<Id, Hash>) -> Result<(), Self::Error>;
 
     async fn delete(&mut self, id: Id) -> Result<Option<Data>, Self::Error>;
 }
