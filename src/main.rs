@@ -38,6 +38,8 @@ struct Args {
         default_value_t = 1
     )]
     interval_minutes: u16,
+    #[clap(long, help = "Patrol just once.")]
+    once: bool,
 }
 
 #[tokio::main]
@@ -59,9 +61,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let poller = SelectivePoller::new(full_mode_poller, simple_modepoller);
 
     let interval_period_secs = args.interval_minutes.max(1) as u64 * 60;
+    let interval_limit = if args.once { Some(1) } else { None };
 
     info!("start app.");
-    let app = App::new(config_repo, data_repo, poller, interval_period_secs);
+    let app = App::new(
+        config_repo,
+        data_repo,
+        poller,
+        interval_period_secs,
+        interval_limit,
+    );
 
     if let Err(why) = app.run().await {
         error!("{why}")

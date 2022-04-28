@@ -8,6 +8,7 @@ pub struct App<ConfigRepository, DataRepository, Poller> {
     data_repo: DataRepository,
     poller: Poller,
     period: std::time::Duration,
+    limit: Option<u8>,
 }
 
 impl<ConfigRepository, DataRepository, Poller> App<ConfigRepository, DataRepository, Poller>
@@ -25,12 +26,14 @@ where
         data_repo: DataRepository,
         poller: Poller,
         interval_period_secs: u64,
+        interval_limit: Option<u8>,
     ) -> Self {
         Self {
             config_repo,
             data_repo,
             poller,
             period: std::time::Duration::from_secs(interval_period_secs),
+            limit: interval_limit,
         }
     }
 
@@ -42,11 +45,18 @@ where
             mut config_repo,
             mut poller,
             period,
+            mut limit,
         } = self;
 
         let mut interval = tokio::time::interval(period);
 
         loop {
+            match &mut limit {
+                Some(0) => break,
+                Some(x) => *x -= 1,
+                None => (),
+            }
+
             info!("waiting for next interval period...");
             let _ = interval.tick().await;
 
@@ -125,6 +135,8 @@ where
                 );
             }
         }
+
+        Ok(())
     }
 }
 
