@@ -142,7 +142,7 @@ impl Drop for PoolItem {
 }
 
 async fn connect(port: u16) -> Result<Client, fantoccini::error::NewSessionError> {
-    ClientBuilder::native()
+    ClientBuilder::rustls()
         .capabilities(CAPABILITIES.clone())
         .connect(&format!("http://localhost:{}", port))
         .await
