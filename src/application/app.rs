@@ -58,7 +58,8 @@ where
             }
 
             info!("waiting for next interval period...");
-            let _ = interval.tick().await;
+            let now = interval.tick().await;
+            let deadline = now + period;
 
             let configs = config_repo
                 .get_all()
@@ -72,7 +73,9 @@ where
                 let poll_stream = poller.poll_multiple(rem.clone()).await;
                 tokio::pin!(poll_stream);
 
-                while let Some((id, result)) = poll_stream.next().await {
+                while let Ok(Some((id, result))) =
+                    tokio::time::timeout_at(deadline, poll_stream.next()).await
+                {
                     let content = match result {
                         Ok(x) => x,
                         Err(why) => {
