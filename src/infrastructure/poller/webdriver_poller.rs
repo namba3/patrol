@@ -6,8 +6,9 @@ use log::debug;
 
 use crate::domain::{Config, Id, Poller};
 
+// use std::lazy::SyncLazy;
+use once_cell::sync::Lazy as SyncLazy;
 use serde_json::{json, Map, Value};
-use std::lazy::SyncLazy;
 
 static CAPABILITIES: SyncLazy<Map<String, Value>> = SyncLazy::new(|| {
     let capabilities = json!({
@@ -58,9 +59,12 @@ impl Poller for WebDriverPoller {
         let mut item = self.client_pool.get().await;
         let client = item.client();
 
-        let content = poll(client, url.as_str(), selector.as_str(), wait_seconds).await?;
+        let result = poll(client, url.as_str(), selector.as_str(), wait_seconds).await;
 
-        Ok(content)
+        // This prevents the browser from spinning and wasting CPU resources
+        let _ = client.goto("about:blank").await;
+
+        result
     }
 
     async fn poll_multiple(&mut self, configs: HashMap<Id, Config>) -> Self::Stream {
@@ -82,6 +86,10 @@ impl Poller for WebDriverPoller {
                 let result = poll(client, url.as_str(), selector.as_str(), wait_seconds)
                     .await
                     .map_err(|e| Error::from(e));
+
+                // This prevents the browser from spinning and wasting CPU resources
+                let _ = client.goto("about:blank").await;
+
                 debug!("[{}]: polling succeeded", &id);
                 let _ = tx.send((id, result));
             });
