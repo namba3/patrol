@@ -50,6 +50,20 @@ where
 
         let mut interval = tokio::time::interval(period);
 
+        let mut last_updated: Option<Timestamp> = {
+            let data_map = data_repo.get_all().await;
+            match data_map {
+                Ok(data_map) => {
+                    let mut data_list: Vec<_> = data_map.into_iter().collect();
+                    data_list.sort_by_key(|x| x.1.last_updated.clone());
+                    data_list.last().map(|d| d.1.last_updated.clone()).flatten()
+                }
+                Err(why) => {
+                    warn!("{why}");
+                    None
+                }
+            }
+        };
         loop {
             match &mut limit {
                 Some(0) => break,
@@ -120,22 +134,36 @@ where
             let yesterday_now = now - Duration::from_days(1);
             let one_hour_ago = now - Duration::from_hours(1);
 
-            for (id, last_updated) in data_list
-                .into_iter()
-                .filter_map(|x| x.1.last_updated.map(|l| (x.0, l)))
-            {
+            let data_list: Vec<_> = data_list
+                .iter()
+                .filter_map(|x| x.1.last_updated.map(|l| (x.0.clone(), l)))
+                .collect();
+
+            for (id, last_updated) in data_list.iter() {
                 let config = configs.get(&id);
                 let url = config.map(|x| x.url.as_str()).unwrap_or("-");
 
-                let style = match last_updated {
-                    _ if one_hour_ago < last_updated => ansi_term::Color::Fixed(15).bold(),
-                    _ if yesterday_now < last_updated => ansi_term::Color::Fixed(7).normal(),
+                let style = match *last_updated {
+                    t if one_hour_ago < t => ansi_term::Color::Fixed(15).bold(),
+                    t if yesterday_now < t => ansi_term::Color::Fixed(7).normal(),
                     _ => ansi_term::Color::Fixed(8).normal(),
                 };
                 info!(
                     "[{id}]: {}",
                     style.paint(format!("last_updated: {last_updated}, url: {url}"))
                 );
+            }
+
+            match (data_list.last(), last_updated.as_mut()) {
+                (Some(last), Some(last_updated)) if *last_updated < last.1 => {
+                    *last_updated = last.1;
+                    notify("updated");
+                }
+                (Some(last), None) => {
+                    last_updated = last.1.into();
+                    notify("updated");
+                }
+                _ => (),
             }
         }
 
@@ -173,4 +201,15 @@ where
     DataRepositoryError: std::error::Error,
     PollerError: std::error::Error,
 {
+}
+
+/// TODO: make this a service
+fn notify(message: &str) {
+    let r = notify_rust::Notification::new()
+        .summary("Patrol")
+        .body(message)
+        .show();
+    if let Err(e) = r {
+        warn!("{e}");
+    }
 }
