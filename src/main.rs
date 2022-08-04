@@ -45,7 +45,7 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-    env_logger::Builder::from_env(Env::default().default_filter_or("warn")).init();
+    env_logger::Builder::from_env(Env::default().default_filter_or("patrol=info")).init();
 
     info!("config_path:      {}", args.config_path);
     info!("data_path:        {}", args.data_path);
