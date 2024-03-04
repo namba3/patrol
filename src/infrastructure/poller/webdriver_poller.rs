@@ -16,7 +16,7 @@ static CAPABILITIES: SyncLazy<Map<String, Value>> = SyncLazy::new(|| {
             "args": ["--headless", "--disable-extensions", "--disable-gpu"],
         },
         "moz:firefoxOptions": {
-            "args": ["--headless", "--safe-mode"],
+            "args": ["--headless" /* , "--safe-mode" */ ] ,
         },
         "timeouts": {
             "implicit": 30000

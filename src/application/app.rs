@@ -1,7 +1,8 @@
 use futures_util::StreamExt;
 use log::{debug, info, warn};
+use prettytable::{color, row, Attr, Cell, Row, Table};
 
-use crate::domain::{self, Duration, Timestamp};
+use crate::domain::{self, timestamp, Duration, Timestamp};
 
 pub struct App<ConfigRepository, DataRepository, Poller> {
     config_repo: ConfigRepository,
@@ -139,32 +140,36 @@ where
                 .filter_map(|x| x.1.last_updated.map(|l| (x.0.clone(), l)))
                 .collect();
 
-            for (id, last_updated) in data_list.iter() {
-                let config = configs.get(&id);
-                let url = config.map(|x| x.url.as_str()).unwrap_or("-");
+            // match (data_list.last(), last_updated.as_mut()) {
+            //     (Some(last), Some(last_updated)) if *last_updated < last.1 => {
+            //         *last_updated = last.1;
+            //         notify("updated");
+            //     }
+            //     (Some(last), None) => {
+            //         last_updated = last.1.into();
+            //         notify("updated");
+            //     }
+            //     _ => (),
+            // }
 
-                let style = match *last_updated {
-                    t if one_hour_ago < t => ansi_term::Color::Fixed(15).bold(),
-                    t if yesterday_now < t => ansi_term::Color::Fixed(7).normal(),
-                    _ => ansi_term::Color::Fixed(8).normal(),
+            let mut table = Table::new();
+
+            table.add_row(row!["name", "last_updated", "url",]);
+            for (id, time) in data_list {
+                let url = &configs[&id].url;
+                let color = match time {
+                    t if one_hour_ago < t => color::BRIGHT_GREEN,
+                    t if yesterday_now < t => color::BRIGHT_YELLOW,
+                    _ => color::WHITE,
                 };
-                info!(
-                    "[{id}]: {}",
-                    style.paint(format!("last_updated: {last_updated}, url: {url}"))
-                );
+                table.add_row(Row::new(vec![
+                    Cell::new(id.as_str()).with_style(Attr::ForegroundColor(color)),
+                    Cell::new(&time.to_string()).with_style(Attr::ForegroundColor(color)),
+                    Cell::new(url.as_str()).with_style(Attr::ForegroundColor(color)),
+                ]));
             }
 
-            match (data_list.last(), last_updated.as_mut()) {
-                (Some(last), Some(last_updated)) if *last_updated < last.1 => {
-                    *last_updated = last.1;
-                    notify("updated");
-                }
-                (Some(last), None) => {
-                    last_updated = last.1.into();
-                    notify("updated");
-                }
-                _ => (),
-            }
+            table.printstd();
         }
 
         Ok(())
