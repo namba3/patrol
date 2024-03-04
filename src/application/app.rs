@@ -160,7 +160,7 @@ where
                 let color = match time {
                     t if one_hour_ago < t => color::BRIGHT_GREEN,
                     t if yesterday_now < t => color::BRIGHT_YELLOW,
-                    _ => color::WHITE,
+                    _ => color::BRIGHT_BLACK,
                 };
                 table.add_row(Row::new(vec![
                     Cell::new(id.as_str()).with_style(Attr::ForegroundColor(color)),

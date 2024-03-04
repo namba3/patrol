@@ -1,3 +1,4 @@
+use chrono::NaiveDateTime;
 use serde_derive::{Deserialize, Serialize};
 use std::fmt::Display;
 
@@ -16,7 +17,7 @@ impl Timestamp {
     pub fn from_unix_nanos(nanos: i64) -> Self {
         let secs = nanos / 1_000_000_000;
         let subsec_nanos = (nanos / 1_000_000_000) as u32;
-        let dt = chrono::NaiveDateTime::from_timestamp(secs, subsec_nanos);
+        let dt = chrono::NaiveDateTime::from_timestamp_opt(secs, subsec_nanos).unwrap();
         Self(dt)
     }
 
@@ -27,13 +28,15 @@ impl Timestamp {
         self.0.timestamp_millis()
     }
     pub fn unix_nanos(&self) -> i64 {
-        self.0.timestamp_nanos()
+        self.0
+            .timestamp_nanos_opt()
+            .unwrap_or_else(|| self.0.timestamp_millis() * 1000)
     }
 }
 
 impl Display for Timestamp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_fmt(format_args!("{}", self.0))
+        f.write_fmt(format_args!("{}", self.0.format("%Y-%m-%d %H:%M:%S")))
     }
 }
 
