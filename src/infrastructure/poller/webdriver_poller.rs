@@ -18,7 +18,9 @@ static CAPABILITIES: SyncLazy<Map<String, Value>> = SyncLazy::new(|| {
         "moz:firefoxOptions": {
             "args": ["--headless", "--safe-mode"],
         },
-        "timeout": "30000"
+        "timeouts": {
+            "implicit": 30000
+        }
     });
 
     if let Value::Object(x) = capabilities {
