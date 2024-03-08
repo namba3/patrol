@@ -5,21 +5,33 @@ edition = "2021"
 
 [dependencies]
 scraper = "0.13"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "fs", "sync"]}
-reqwest = { version = "0.11", default-features = false, features = ["rustls-tls"] }
+tokio = { version = "1.36.0", features = [
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "time",
+    "fs",
+    "sync",
+    "io-std",
+] }
+reqwest = { version = "0.11", default-features = false, features = [
+    "rustls-tls",
+] }
 sha2 = "0.10"
 toml = "0.5"
 serde = "1"
 serde_derive = "1"
 futures-util = "0.3"
-chrono = { version = "0.4", features = ["serde"]}
+chrono = { version = "0.4", features = ["serde"] }
 async-stream = "0.3"
 async-trait = "0.1"
 url = "2"
-clap = { version = "3", features = ["derive"]}
+clap = { version = "3", features = ["derive"] }
 log = "0.4"
 env_logger = "0.9"
-fantoccini = { version = "0.18", default-features = false, features = ["rustls-tls"]}
+fantoccini = { version = "0.18", default-features = false, features = [
+    "rustls-tls",
+] }
 serde_json = "1.0.79"
 ansi_term = "0.12"
 uuid = { version = "1", features = ["v4"] }
