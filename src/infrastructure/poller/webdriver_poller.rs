@@ -56,12 +56,20 @@ impl Poller for WebDriverPoller {
             url,
             selector,
             wait_seconds,
+            force_wait,
             ..
         } = config;
         let mut item = self.client_pool.get().await;
         let client = item.client();
 
-        let result = poll(client, url.as_str(), selector.as_str(), wait_seconds).await;
+        let result = poll(
+            client,
+            url.as_str(),
+            selector.as_str(),
+            wait_seconds,
+            force_wait,
+        )
+        .await;
 
         // This prevents the browser from spinning and wasting CPU resources
         let _ = client.goto("about:blank").await;
@@ -80,14 +88,21 @@ impl Poller for WebDriverPoller {
                     url,
                     selector,
                     wait_seconds,
+                    force_wait,
                     ..
                 } = config;
                 let mut item = client_pool.get().await;
                 let client = item.client();
                 debug!("[{}]: start polling {}", &id, url.as_str());
-                let result = poll(client, url.as_str(), selector.as_str(), wait_seconds)
-                    .await
-                    .map_err(|e| Error::from(e));
+                let result = poll(
+                    client,
+                    url.as_str(),
+                    selector.as_str(),
+                    wait_seconds,
+                    force_wait,
+                )
+                .await
+                .map_err(|e| Error::from(e));
 
                 // This prevents the browser from spinning and wasting CPU resources
                 let _ = client.goto("about:blank").await;
@@ -164,15 +179,21 @@ async fn poll(
     url: &str,
     selector: &str,
     wait_seconds: Option<u16>,
+    force_wait: bool,
 ) -> Result<String, Error> {
     client.goto(url).await?;
     client.wait().for_element(Locator::Css("html")).await?;
 
-    if let Some(secs) = wait_seconds {
-        tokio::time::sleep(std::time::Duration::from_secs(secs as u64)).await;
-    }
+    let secs = wait_seconds.unwrap_or(30);
+    let dur = std::time::Duration::from_secs(secs as u64);
+    let fut = client.wait().for_element(Locator::Css(selector));
 
-    let mut elem = client.wait().for_element(Locator::Css(selector)).await?;
+    let mut elem = if force_wait {
+        tokio::time::sleep(dur).await;
+        fut.await?
+    } else {
+        tokio::time::timeout(dur, fut).await??
+    };
     let content = elem.text().await?;
 
     Ok(content)
@@ -182,6 +203,7 @@ async fn poll(
 pub enum Error {
     NewSessionError(fantoccini::error::NewSessionError),
     CmdError(fantoccini::error::CmdError),
+    Timeout(tokio::time::error::Elapsed),
 }
 impl Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -192,6 +214,7 @@ impl Display for Error {
             Error::CmdError(e) => {
                 f.write_fmt(format_args!("failed to manipulate the browser: {e}"))
             }
+            Error::Timeout(_) => f.write_fmt(format_args!("timeout")),
         }
     }
 }
@@ -204,5 +227,10 @@ impl From<fantoccini::error::NewSessionError> for Error {
 impl From<fantoccini::error::CmdError> for Error {
     fn from(e: fantoccini::error::CmdError) -> Self {
         Error::CmdError(e)
+    }
+}
+impl From<tokio::time::error::Elapsed> for Error {
+    fn from(e: tokio::time::error::Elapsed) -> Self {
+        Error::Timeout(e)
     }
 }

@@ -16,6 +16,7 @@ struct TomlConfig {
     selector: Selector,
     mode: Option<Mode>,
     wait_seconds: Option<u16>,
+    force_wait: Option<bool>,
 }
 impl From<Config> for TomlConfig {
     fn from(c: Config) -> Self {
@@ -24,12 +25,14 @@ impl From<Config> for TomlConfig {
             selector,
             mode,
             wait_seconds,
+            force_wait,
         } = c;
         Self {
             url,
             selector,
             mode: mode.into(),
             wait_seconds,
+            force_wait: force_wait.into(),
         }
     }
 }
@@ -40,12 +43,14 @@ impl Into<Config> for TomlConfig {
             selector,
             mode,
             wait_seconds,
+            force_wait,
         } = self;
         Config {
             url,
             selector,
             mode: mode.unwrap_or_default(),
             wait_seconds,
+            force_wait: force_wait.unwrap_or_default(),
         }
     }
 }
