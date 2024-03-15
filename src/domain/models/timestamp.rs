@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, Utc};
 use serde_derive::{Deserialize, Serialize};
 use std::fmt::Display;
 
@@ -38,7 +38,10 @@ impl Timestamp {
 
 impl Display for Timestamp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_fmt(format_args!("{}", self.0.format("%Y-%m-%d %H:%M:%S")))
+        f.write_fmt(format_args!(
+            "{}",
+            DateTime::<Local>::from(self.0).format("%Y-%m-%d %H:%M:%S")
+        ))
     }
 }
 
