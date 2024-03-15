@@ -56,20 +56,12 @@ impl Poller for WebDriverPoller {
             url,
             selector,
             wait_seconds,
-            force_wait,
             ..
         } = config;
         let mut item = self.client_pool.get().await;
         let client = item.client();
 
-        let result = poll(
-            client,
-            url.as_str(),
-            selector.as_str(),
-            wait_seconds,
-            force_wait,
-        )
-        .await;
+        let result = poll(client, url.as_str(), selector.as_str(), wait_seconds).await;
 
         // This prevents the browser from spinning and wasting CPU resources
         let _ = client.goto("about:blank").await;
@@ -88,21 +80,14 @@ impl Poller for WebDriverPoller {
                     url,
                     selector,
                     wait_seconds,
-                    force_wait,
                     ..
                 } = config;
                 let mut item = client_pool.get().await;
                 let client = item.client();
                 debug!("[{}]: start polling {}", &id, url.as_str());
-                let result = poll(
-                    client,
-                    url.as_str(),
-                    selector.as_str(),
-                    wait_seconds,
-                    force_wait,
-                )
-                .await
-                .map_err(|e| Error::from(e));
+                let result = poll(client, url.as_str(), selector.as_str(), wait_seconds)
+                    .await
+                    .map_err(|e| Error::from(e));
 
                 // This prevents the browser from spinning and wasting CPU resources
                 let _ = client.goto("about:blank").await;
@@ -179,21 +164,19 @@ async fn poll(
     url: &str,
     selector: &str,
     wait_seconds: Option<u16>,
-    force_wait: bool,
 ) -> Result<String, Error> {
     client.goto(url).await?;
     client.wait().for_element(Locator::Css("html")).await?;
 
-    let secs = wait_seconds.unwrap_or(30);
-    let dur = std::time::Duration::from_secs(secs as u64);
     let fut = client.wait().for_element(Locator::Css(selector));
 
-    let mut elem = if force_wait {
-        tokio::time::sleep(dur).await;
-        fut.await?
-    } else {
-        tokio::time::timeout(dur, fut).await??
-    };
+    match wait_seconds {
+        Some(x) if 0 < x => tokio::time::sleep(std::time::Duration::from_secs(x as u64)).await,
+        _ => (),
+    }
+
+    let timeout = std::time::Duration::from_secs(30 as u64);
+    let mut elem = tokio::time::timeout(timeout, fut).await??;
     let content = elem.text().await?;
 
     Ok(content)

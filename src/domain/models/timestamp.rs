@@ -1,12 +1,14 @@
-use chrono::NaiveDateTime;
+use chrono::{DateTime, Utc};
 use serde_derive::{Deserialize, Serialize};
 use std::fmt::Display;
 
+type DT = DateTime<Utc>;
+
 #[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Timestamp(chrono::NaiveDateTime);
+pub struct Timestamp(chrono::DateTime<Utc>);
 impl Timestamp {
     pub fn now() -> Self {
-        Self(chrono::Utc::now().naive_utc())
+        Self(chrono::Utc::now())
     }
     pub fn from_unix_secs(secs: i64) -> Self {
         Self::from_unix_nanos(secs * 1_000_000_000)
@@ -17,7 +19,7 @@ impl Timestamp {
     pub fn from_unix_nanos(nanos: i64) -> Self {
         let secs = nanos / 1_000_000_000;
         let subsec_nanos = (nanos / 1_000_000_000) as u32;
-        let dt = chrono::NaiveDateTime::from_timestamp_opt(secs, subsec_nanos).unwrap();
+        let dt = DT::from_timestamp(secs, subsec_nanos).unwrap();
         Self(dt)
     }
 

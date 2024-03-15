@@ -18,7 +18,6 @@ pub struct Config {
     pub selector: Selector,
     pub mode: Mode,
     pub wait_seconds: Option<u16>,
-    pub force_wait: bool,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]

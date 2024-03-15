@@ -2,7 +2,7 @@ use futures_util::StreamExt;
 use log::{debug, info, warn};
 use prettytable::{color, row, Attr, Cell, Row, Table};
 
-use crate::domain::{self, timestamp, Duration, Timestamp};
+use crate::domain::{self, Duration, Timestamp};
 
 pub struct App<ConfigRepository, DataRepository, Poller> {
     config_repo: ConfigRepository,
@@ -51,7 +51,7 @@ where
 
         let mut interval = tokio::time::interval(period);
 
-        let mut last_updated: Option<Timestamp> = {
+        let mut _last_updated: Option<Timestamp> = {
             let data_map = data_repo.get_all().await;
             match data_map {
                 Ok(data_map) => {
