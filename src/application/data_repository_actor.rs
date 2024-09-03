@@ -3,7 +3,7 @@ use std::{
     fmt::Display,
 };
 
-use crate::domain::{self, Id};
+use crate::domain::{self, Id, Timestamp};
 use tokio::sync::{mpsc, oneshot};
 
 pub struct DataRepositoryActor<DataRepository> {
@@ -66,7 +66,7 @@ enum Message<E> {
         tx: oneshot::Sender<Result<HashMap<Id, domain::Data>, E>>,
     },
     Update {
-        tx: oneshot::Sender<Result<(), E>>,
+        tx: oneshot::Sender<Result<Option<Timestamp>, E>>,
         id: Id,
         hash: domain::Hash,
     },
@@ -135,7 +135,11 @@ impl<DataRepository: domain::DataRepository> domain::DataRepository
         }
     }
 
-    async fn update(&mut self, id: Id, hash: domain::Hash) -> Result<(), Self::Error> {
+    async fn update(
+        &mut self,
+        id: Id,
+        hash: domain::Hash,
+    ) -> Result<Option<Timestamp>, Self::Error> {
         let (tx, rx) = oneshot::channel();
         if let Err(_e) = self.tx_message.send(Message::Update { tx, id, hash }) {
             return Err(Error::ActorMessageError(ActorMessageError::SendError));

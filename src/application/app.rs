@@ -1,6 +1,7 @@
 use futures_util::StreamExt;
 use log::{debug, info, warn};
 use prettytable::{color, row, Attr, Cell, Row, Table};
+use tokio::sync::mpsc;
 
 use crate::domain::{self, Duration, Timestamp};
 
@@ -10,6 +11,12 @@ pub struct App<ConfigRepository, DataRepository, Poller> {
     poller: Poller,
     period: std::time::Duration,
     limit: Option<u8>,
+}
+
+pub struct DocUpdateInfo {
+    pub id: String,
+    pub url: String,
+    pub timestamp: String,
 }
 
 impl<ConfigRepository, DataRepository, Poller> App<ConfigRepository, DataRepository, Poller>
@@ -40,6 +47,7 @@ where
 
     pub async fn run(
         self,
+        tx_doc_update: mpsc::UnboundedSender<DocUpdateInfo>,
     ) -> Result<(), Error<ConfigRepository::Error, DataRepository::Error, Poller::Error>> {
         let Self {
             mut data_repo,
@@ -51,20 +59,6 @@ where
 
         let mut interval = tokio::time::interval(period);
 
-        let mut _last_updated: Option<Timestamp> = {
-            let data_map = data_repo.get_all().await;
-            match data_map {
-                Ok(data_map) => {
-                    let mut data_list: Vec<_> = data_map.into_iter().collect();
-                    data_list.sort_by_key(|x| x.1.last_updated.clone());
-                    data_list.last().map(|d| d.1.last_updated.clone()).flatten()
-                }
-                Err(why) => {
-                    warn!("{why}");
-                    None
-                }
-            }
-        };
         loop {
             match &mut limit {
                 Some(0) => break,
@@ -110,8 +104,18 @@ where
 
                     let hash = domain::Hash::new(content.as_bytes());
 
-                    if let Err(why) = data_repo.update(id.clone(), hash).await {
-                        warn!("[{id}]: {why}")
+                    match data_repo.update(id.clone(), hash).await {
+                        Ok(Some(timestamp)) => {
+                            let _ = tx_doc_update.send(DocUpdateInfo {
+                                id: id.to_string(),
+                                url: configs[&id].url.as_str().to_owned(),
+                                timestamp: timestamp.to_string(),
+                            });
+                        }
+                        Ok(None) => (),
+                        Err(why) => {
+                            warn!("[{id}]: {why}")
+                        }
                     }
 
                     let _ = rem.remove(&id);
@@ -139,18 +143,6 @@ where
                 .iter()
                 .filter_map(|x| x.1.last_updated.map(|l| (x.0.clone(), l)))
                 .collect();
-
-            // match (data_list.last(), last_updated.as_mut()) {
-            //     (Some(last), Some(last_updated)) if *last_updated < last.1 => {
-            //         *last_updated = last.1;
-            //         notify("updated");
-            //     }
-            //     (Some(last), None) => {
-            //         last_updated = last.1.into();
-            //         notify("updated");
-            //     }
-            //     _ => (),
-            // }
 
             let mut table = Table::new();
 
@@ -206,15 +198,4 @@ where
     DataRepositoryError: std::error::Error,
     PollerError: std::error::Error,
 {
-}
-
-/// TODO: make this a service
-fn notify(message: &str) {
-    let r = notify_rust::Notification::new()
-        .summary("Patrol")
-        .body(message)
-        .show();
-    if let Err(e) = r {
-        warn!("{e}");
-    }
 }
