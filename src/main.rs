@@ -68,6 +68,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("interval_minutes: {}", args.interval_minutes);
     info!("webdriver_ports:  {:?}", args.webdriver_ports);
 
+    let (tx_doc_update, mut rx_doc_update) =
+        tokio::sync::mpsc::unbounded_channel::<DocUpdateInfo>();
+    let (tx, rx) = broadcast::channel(100);
+    let web_app_state = Arc::new(AppState { rx });
+    let web_app = Router::new()
+        .route("/", get(websocket_handler))
+        .layer(Extension(web_app_state));
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
+    let web_app = tokio::spawn(async { axum::serve(listener, web_app).await });
+    info!("websocket server is listening on ws://0.0.0.0:3000/");
+
     let config_repo = TomlConfigRepository::new(&args.config_path).await?;
     let data_repo = TomlDataRepository::new(&args.data_path).await?;
 
@@ -87,17 +98,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         interval_period_secs,
         interval_limit,
     );
-
-    let (tx_doc_update, mut rx_doc_update) =
-        tokio::sync::mpsc::unbounded_channel::<DocUpdateInfo>();
-    let (tx, rx) = broadcast::channel(100);
-    let web_app_state = Arc::new(AppState { rx });
-    let web_app = Router::new()
-        .route("/", get(websocket_handler))
-        .layer(Extension(web_app_state));
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
-
-    let web_app = async { axum::serve(listener, web_app).await };
 
     let message_dealer = tokio::spawn(async move {
         while let Some(x) = rx_doc_update.recv().await {

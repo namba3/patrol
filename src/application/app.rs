@@ -95,7 +95,7 @@ where
 
                     let content = content.trim_start().trim_end();
 
-                    if content.len() <= 0 {
+                    if content.trim().len() <= 0 {
                         warn!("[{id}]: ignore empty content.");
                         continue;
                     }

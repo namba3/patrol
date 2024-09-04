@@ -100,20 +100,14 @@ impl DataRepository for TomlDataRepository {
 
     async fn update(&mut self, id: Id, hash: Hash) -> Result<Option<Timestamp>, Self::Error> {
         let now = Timestamp::now();
-        let prev_hash = self
-            .get(id.clone())
-            .await
-            .ok()
-            .flatten()
-            .map(|x| x.hash)
-            .flatten();
         let restore_info = self.update_map(id.clone(), hash.clone(), now);
 
         if let Err(e) = self.proxy.save().await {
             self.restore(restore_info);
             Err(e.into())
         } else {
-            let timestamp = if Some(hash.clone()) != prev_hash {
+            let prev_hash = restore_info.data.map(|x| x.hash).flatten();
+            let timestamp = if Some(&hash) != prev_hash.as_ref() {
                 Some(now)
             } else {
                 None
