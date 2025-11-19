@@ -6,7 +6,7 @@ use log::{error, info};
 use patrol::application::app::DocUpdateInfo;
 use patrol::application::{App, SelectivePoller};
 use patrol::infrastructure::{
-    HttpPoller, TomlConfigRepository, TomlDataRepository, WebDriverPoller,
+    HttpPoller, PlaywrightPoller, TomlConfigRepository, TomlDataRepository,
 };
 
 use axum::{
@@ -43,10 +43,10 @@ struct Args {
     #[clap(
         short('p'),
         long,
-        help = "Specify the Web Driver port to connect to.\nThis can be specified multiple times.",
-        default_value = "9515"
+        help = "Specify the worker num for full mode.",
+        default_value_t = 10
     )]
-    webdriver_ports: Vec<u16>,
+    worker_num: u8,
     #[clap(
         short('i'),
         long,
@@ -66,7 +66,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("config_path:      {}", args.config_path);
     info!("data_path:        {}", args.data_path);
     info!("interval_minutes: {}", args.interval_minutes);
-    info!("webdriver_ports:  {:?}", args.webdriver_ports);
+    info!("worker_num:  {:?}", args.worker_num);
 
     let (tx_doc_update, mut rx_doc_update) =
         tokio::sync::mpsc::unbounded_channel::<DocUpdateInfo>();
@@ -82,7 +82,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_repo = TomlConfigRepository::new(&args.config_path).await?;
     let data_repo = TomlDataRepository::new(&args.data_path).await?;
 
-    let full_mode_poller = WebDriverPoller::new(args.webdriver_ports.as_slice()).await?;
+    // let full_mode_poller = WebDriverPoller::new(args.webdriver_ports.as_slice()).await?;
+    let full_mode_poller = PlaywrightPoller::new(args.worker_num).await?;
     let simple_mode_poller = HttpPoller::new();
 
     let poller = SelectivePoller::new(full_mode_poller, simple_mode_poller);
