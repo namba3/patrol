@@ -1,10 +1,9 @@
-use std::{collections::HashMap, fmt::Display, sync::Arc, task::Context};
+use std::{collections::HashMap, fmt::Display, sync::Arc};
 
-use futures::{FutureExt, TryFutureExt};
-use futures_util::Stream;
+use futures_util::{stream, Stream, StreamExt};
 use log::debug;
 use playwright::{
-    api::{Browser, BrowserContext, BrowserType, Page},
+    api::{BrowserContext, Page},
     Playwright,
 };
 
@@ -16,15 +15,16 @@ static PLAYWRIGHT: OnceCell<Playwright> = OnceCell::const_new();
 
 #[derive(Debug)]
 pub struct PlaywrightPoller {
-    _pool_size: u8,
+    pool_size: u8,
     client_pool: ClientPool,
 }
 
 impl PlaywrightPoller {
     pub async fn new(pool_size: u8) -> Result<Self, Error> {
+        let pool_size = pool_size.max(1);
         let client_pool = ClientPool::new(pool_size).await?;
         Ok(Self {
-            _pool_size: pool_size,
+            pool_size,
             client_pool,
         })
     }
@@ -54,36 +54,40 @@ impl Poller for PlaywrightPoller {
 
     async fn poll_multiple(&mut self, configs: HashMap<Id, Config>) -> Self::Stream {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let client_pool = self.client_pool.clone();
+        let pool_size = self.pool_size as usize;
+        tokio::spawn(async move {
+            stream::iter(configs)
+                .for_each_concurrent(pool_size, |(id, config)| {
+                    let mut client_pool = client_pool.clone();
+                    let tx = tx.clone();
+                    async move {
+                        let Config {
+                            url,
+                            selector,
+                            wait_seconds,
+                            ..
+                        } = config;
+                        let mut item = client_pool.get().await;
+                        let client = item.client();
+                        debug!("[{}]: start polling {}", &id, url.as_str());
+                        let result = poll(client, url.as_str(), selector.as_str(), wait_seconds)
+                            .await
+                            .map_err(Error::from);
 
-        for (id, config) in configs.into_iter() {
-            let mut client_pool = self.client_pool.clone();
-            let tx = tx.clone();
-            tokio::spawn(async move {
-                let Config {
-                    url,
-                    selector,
-                    wait_seconds,
-                    ..
-                } = config;
-                let mut item = client_pool.get().await;
-                let client = item.client();
-                debug!("[{}]: start polling {}", &id, url.as_str());
-                let result = poll(client, url.as_str(), selector.as_str(), wait_seconds)
-                    .await
-                    .map_err(|e| Error::from(e));
+                        // This prevents the browser from spinning and wasting CPU resources
+                        let _ = client.goto_builder("about:blank").goto().await;
 
-                // This prevents the browser from spinning and wasting CPU resources
-                let _ = client.goto_builder("about:blank").goto().await;
-
-                debug!("[{}]: polling succeeded", &id);
-                let _ = tx.send((id, result));
-            });
-        }
-        drop(tx);
+                        debug!("[{}]: polling succeeded", &id);
+                        let _ = tx.send((id, result));
+                    }
+                })
+                .await;
+        });
 
         async_stream::stream! {
-            while let Some(x) = rx.recv().await {
-                yield x;
+            while let Some(result) = rx.recv().await {
+                yield result;
             }
         }
     }
@@ -93,9 +97,7 @@ impl Poller for PlaywrightPoller {
 struct ClientPool {
     lending_tabs: std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<Page>>>,
     returning_tabs: tokio::sync::mpsc::UnboundedSender<Page>,
-    // browser_type: BrowserType,
-    // browser: Arc<Browser>,
-    context: Arc<BrowserContext>,
+    _context: Arc<BrowserContext>,
 }
 impl ClientPool {
     async fn new(pool_size: u8) -> Result<Self, Error> {
@@ -118,9 +120,7 @@ impl ClientPool {
         let r = Self {
             lending_tabs: std::sync::Arc::new(tokio::sync::Mutex::new(lending_tabs)),
             returning_tabs,
-            //            browser_type: chromium,
-            // browser: Arc::new(browser),
-            context: Arc::new(context),
+            _context: Arc::new(context),
         };
 
         Ok(r)
