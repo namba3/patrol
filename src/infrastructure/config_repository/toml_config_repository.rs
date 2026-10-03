@@ -158,3 +158,81 @@ impl From<SelectorParseError> for Error {
         Error::SelectorParseError(e)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use crate::domain::{ConfigRepository, Id, Mode};
+
+    use super::TomlConfigRepository;
+
+    fn temp_config_path() -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "patrol-config-repository-{}.toml",
+            uuid::Uuid::new_v4()
+        ))
+    }
+
+    #[tokio::test]
+    async fn loads_default_and_explicit_modes() {
+        let path = temp_config_path();
+        let source = r#"
+[DefaultMode]
+url = "https://example.com/default"
+selector = "main"
+
+[SimpleMode]
+url = "https://example.com/simple"
+selector = ".status"
+mode = "simple"
+wait_seconds = 3
+"#;
+        std::fs::write(&path, source).unwrap();
+
+        let mut repository = TomlConfigRepository::new(path.to_str().unwrap())
+            .await
+            .unwrap();
+        let configs = repository.get_all().await.unwrap();
+        let default = &configs[&Id::try_from("DefaultMode".to_owned()).unwrap()];
+        let simple = &configs[&Id::try_from("SimpleMode".to_owned()).unwrap()];
+
+        assert_eq!(default.mode, Mode::Full);
+        assert_eq!(default.wait_seconds, None);
+        assert_eq!(simple.mode, Mode::Simple);
+        assert_eq!(simple.wait_seconds, Some(3));
+
+        drop(repository);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn rejects_invalid_url() {
+        let path = temp_config_path();
+        std::fs::write(
+            &path,
+            "[Broken]\nurl = \"not a url\"\nselector = \"main\"\n",
+        )
+        .unwrap();
+
+        let result = TomlConfigRepository::new(path.to_str().unwrap()).await;
+
+        assert!(result.is_err());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn rejects_invalid_selector() {
+        let path = temp_config_path();
+        std::fs::write(
+            &path,
+            "[Broken]\nurl = \"https://example.com\"\nselector = \"div[\"\n",
+        )
+        .unwrap();
+
+        let result = TomlConfigRepository::new(path.to_str().unwrap()).await;
+
+        assert!(result.is_err());
+        std::fs::remove_file(path).unwrap();
+    }
+}

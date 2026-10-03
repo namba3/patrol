@@ -124,3 +124,145 @@ where
     SimpleModePollerError: std::error::Error,
 {
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::HashMap, fmt::Display, pin::Pin};
+
+    use futures_util::{stream, Stream, StreamExt};
+
+    use super::{Error, SelectivePoller};
+    use crate::domain::{Config, Id, Mode, Poller, Selector, Url};
+
+    #[derive(Debug)]
+    struct TestPollerError;
+
+    impl Display for TestPollerError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("test poller error")
+        }
+    }
+
+    impl std::error::Error for TestPollerError {}
+
+    #[derive(Debug)]
+    struct MockPoller {
+        name: &'static str,
+        fail: bool,
+    }
+
+    impl MockPoller {
+        fn result(&self, id: &Id) -> Result<String, TestPollerError> {
+            if self.fail {
+                Err(TestPollerError)
+            } else {
+                Ok(format!("{}:{}", self.name, id.as_str()))
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Poller for MockPoller {
+        type Error = TestPollerError;
+        type Stream = Pin<Box<dyn Stream<Item = (Id, Result<String, Self::Error>)> + Send>>;
+
+        async fn poll(&mut self, id: Id, _config: Config) -> Result<String, Self::Error> {
+            self.result(&id)
+        }
+
+        async fn poll_multiple(&mut self, configs: HashMap<Id, Config>) -> Self::Stream {
+            let results = configs
+                .into_keys()
+                .map(|id| {
+                    let result = self.result(&id);
+                    (id, result)
+                })
+                .collect::<Vec<_>>();
+
+            Box::pin(stream::iter(results))
+        }
+    }
+
+    fn id(value: &str) -> Id {
+        Id::try_from(value.to_owned()).unwrap()
+    }
+
+    fn config(mode: Mode) -> Config {
+        Config {
+            url: Url::new("https://example.com".to_owned()).unwrap(),
+            selector: Selector::new("main".to_owned()).unwrap(),
+            mode,
+            wait_seconds: None,
+        }
+    }
+
+    fn poller() -> SelectivePoller<MockPoller, MockPoller> {
+        SelectivePoller::new(
+            MockPoller {
+                name: "full",
+                fail: false,
+            },
+            MockPoller {
+                name: "simple",
+                fail: false,
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn poll_routes_to_the_poller_selected_by_mode() {
+        let mut poller = poller();
+
+        let full = poller
+            .poll(id("full-page"), config(Mode::Full))
+            .await
+            .unwrap();
+        let simple = poller
+            .poll(id("simple-page"), config(Mode::Simple))
+            .await
+            .unwrap();
+
+        assert_eq!(full, "full:full-page");
+        assert_eq!(simple, "simple:simple-page");
+    }
+
+    #[tokio::test]
+    async fn poll_multiple_splits_modes_and_merges_results() {
+        let mut poller = poller();
+        let full_id = id("full-page");
+        let simple_id = id("simple-page");
+        let configs = HashMap::from([
+            (full_id.clone(), config(Mode::Full)),
+            (simple_id.clone(), config(Mode::Simple)),
+        ]);
+
+        let results = poller
+            .poll_multiple(configs)
+            .await
+            .collect::<Vec<_>>()
+            .await;
+        let results = results.into_iter().collect::<HashMap<_, _>>();
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[&full_id].as_ref().unwrap(), "full:full-page");
+        assert_eq!(results[&simple_id].as_ref().unwrap(), "simple:simple-page");
+    }
+
+    #[tokio::test]
+    async fn poll_errors_identify_the_selected_poller() {
+        let mut poller = SelectivePoller::new(
+            MockPoller {
+                name: "full",
+                fail: false,
+            },
+            MockPoller {
+                name: "simple",
+                fail: true,
+            },
+        );
+
+        let result = poller.poll(id("simple-page"), config(Mode::Simple)).await;
+
+        assert!(matches!(result, Err(Error::SimpleModePollerError(_))));
+    }
+}

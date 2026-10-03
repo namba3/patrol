@@ -54,8 +54,12 @@ async fn poll(client: &Client, config: Config) -> Result<String, reqwest::Error>
     let response = client.get(url.as_str()).send().await?;
     let txt = response.text().await?;
 
-    let doc = Html::parse_document(&txt);
-    let selector = scraper::Selector::parse(selector.as_str()).unwrap();
+    Ok(extract_text(&txt, selector.as_str()))
+}
+
+fn extract_text(html: &str, selector: &str) -> String {
+    let doc = Html::parse_document(html);
+    let selector = scraper::Selector::parse(selector).unwrap();
 
     let content = doc
         .select(&selector)
@@ -65,5 +69,28 @@ async fn poll(client: &Client, config: Config) -> Result<String, reqwest::Error>
         .collect::<Vec<_>>()
         .join("\n");
 
-    Ok(content)
+    content
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_text;
+
+    #[test]
+    fn extracts_trimmed_text_from_each_matching_element() {
+        let html = r#"
+<main>
+  <p class="selected"> first </p>
+  <p class="selected"> second <b> nested </b></p>
+  <p>ignore this</p>
+</main>
+"#;
+
+        assert_eq!(extract_text(html, "p.selected"), "first\nsecond\nnested");
+    }
+
+    #[test]
+    fn returns_empty_text_when_selector_has_no_matches() {
+        assert_eq!(extract_text("<main><p>content</p></main>", ".missing"), "");
+    }
 }
