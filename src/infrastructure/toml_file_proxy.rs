@@ -103,6 +103,63 @@ impl From<std::io::Error> for Error {
         Error::IoError(e)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::HashMap, path::PathBuf};
+
+    use super::{Error, TomlFileProxy};
+
+    fn temp_toml_path() -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "patrol-toml-file-proxy-{}.toml",
+            uuid::Uuid::new_v4()
+        ))
+    }
+
+    #[tokio::test]
+    async fn save_without_cache_returns_cache_empty() {
+        let path = temp_toml_path();
+        let mut proxy = TomlFileProxy::<HashMap<String, String>>::new(path.to_str().unwrap())
+            .await
+            .unwrap();
+
+        assert!(matches!(proxy.save().await, Err(Error::CacheEmpty)));
+
+        drop(proxy);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn saves_cache_and_loads_it_again() {
+        let path = temp_toml_path();
+        let path_string = path.to_str().unwrap();
+        let mut proxy = TomlFileProxy::<HashMap<String, String>>::new(path_string)
+            .await
+            .unwrap();
+        let mut expected = HashMap::from([
+            ("page".to_owned(), "a long value to be replaced".to_owned()),
+            ("other".to_owned(), "kept".to_owned()),
+        ]);
+
+        proxy.save_with_data(expected.clone()).await.unwrap();
+        proxy
+            .get_cache_mut()
+            .unwrap()
+            .insert("page".to_owned(), "short".to_owned());
+        expected.insert("page".to_owned(), "short".to_owned());
+        proxy.save().await.unwrap();
+        drop(proxy);
+
+        let mut reloaded = TomlFileProxy::<HashMap<String, String>>::new(path_string)
+            .await
+            .unwrap();
+        assert_eq!(reloaded.load().await.unwrap(), &expected);
+
+        drop(reloaded);
+        std::fs::remove_file(path).unwrap();
+    }
+}
 impl From<toml::de::Error> for Error {
     fn from(e: toml::de::Error) -> Self {
         Error::TomlError(e)
