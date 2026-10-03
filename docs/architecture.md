@@ -34,8 +34,8 @@ DomainはTOMLやHTTPクライアントといった保存・通信手段を選び
 - `TomlConfigRepository`: 設定をTOMLから読み込み、変更をファイルに保存します。
 - `TomlDataRepository`: ハッシュや時刻などの巡回状態をTOMLに保存します。
 - `TomlFileProxy`: TOMLファイルをメモリ上のキャッシュと同期します。
-- `HttpPoller`: HTTPで取得したHTMLをCSSセレクターで解析します。
-- `PlaywrightPoller`: ヘッドレスChromiumでページを開き、DOM要素のテキストを取得します。
+- `HttpPoller`: HTTPでHTMLを取得し、CSSセレクターによるCPU処理をブロッキング用スレッドプールで実行します。
+- `PlaywrightPoller`: Fullモードの初回巡回時にPlaywrightとChromiumを初期化・準備し、DOM要素のテキストを取得します。Simpleモードだけを使う場合はブラウザーを起動・準備しません。
 
 ### Composition root — `src/main.rs`
 

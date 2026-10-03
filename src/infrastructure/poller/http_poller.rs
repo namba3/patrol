@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt::Display;
 
 use futures_util::{stream, Stream, StreamExt};
 use reqwest::Client;
@@ -24,7 +25,7 @@ impl HttpPoller {
 
 #[async_trait::async_trait]
 impl Poller for HttpPoller {
-    type Error = reqwest::Error;
+    type Error = Error;
     type Stream = impl Stream<Item = (Id, Result<String, Self::Error>)>;
 
     async fn poll(&mut self, _id: Id, config: Config) -> Result<String, Self::Error> {
@@ -42,13 +43,46 @@ impl Poller for HttpPoller {
     }
 }
 
-async fn poll(client: &Client, config: Config) -> Result<String, reqwest::Error> {
+async fn poll(client: &Client, config: Config) -> Result<String, Error> {
     let Config { url, selector, .. } = config;
 
-    let response = client.get(url.as_str()).send().await?;
+    let response = client.get(url.as_str()).send().await?.error_for_status()?;
     let txt = response.text().await?;
+    let selector: String = selector.into();
 
-    Ok(extract_text(&txt, selector.as_str()))
+    tokio::task::spawn_blocking(move || extract_text(&txt, &selector))
+        .await
+        .map_err(Error::HtmlExtraction)
+}
+
+#[derive(Debug)]
+pub enum Error {
+    Request(reqwest::Error),
+    HtmlExtraction(tokio::task::JoinError),
+}
+
+impl Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Request(error) => write!(f, "HTTP request failed: {error}"),
+            Self::HtmlExtraction(error) => write!(f, "HTML extraction task failed: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Request(error) => Some(error),
+            Self::HtmlExtraction(error) => Some(error),
+        }
+    }
+}
+
+impl From<reqwest::Error> for Error {
+    fn from(error: reqwest::Error) -> Self {
+        Self::Request(error)
+    }
 }
 
 fn extract_text(html: &str, selector: &str) -> String {
@@ -73,10 +107,10 @@ mod tests {
         Arc,
     };
 
-    use axum::{extract::State, routing::get, Router};
+    use axum::{extract::State, http::StatusCode, routing::get, Router};
     use futures_util::StreamExt;
 
-    use super::{extract_text, HttpPoller};
+    use super::{extract_text, Error, HttpPoller};
     use crate::domain::{Config, Id, Mode, Poller, Selector, Url};
 
     #[derive(Clone)]
@@ -91,6 +125,10 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(80)).await;
         tracker.active.fetch_sub(1, Ordering::SeqCst);
         "<p>response</p>"
+    }
+
+    async fn unavailable_response() -> (StatusCode, &'static str) {
+        (StatusCode::SERVICE_UNAVAILABLE, "temporarily unavailable")
     }
 
     #[test]
@@ -152,6 +190,35 @@ mod tests {
             .all(|(_, result)| matches!(result.as_deref(), Ok("response"))));
         assert_eq!(tracker.max_active.load(Ordering::SeqCst), 2);
 
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn treats_server_error_status_as_a_poll_failure() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = Router::new().route("/unavailable", get(unavailable_response));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+
+        let config = Config {
+            url: Url::new(format!("http://{address}/unavailable")).unwrap(),
+            selector: Selector::new("body".to_owned()).unwrap(),
+            mode: Mode::Simple,
+            wait_seconds: None,
+        };
+        let mut poller = HttpPoller::new(1);
+
+        let error = poller
+            .poll(Id::try_from("UnavailablePage".to_owned()).unwrap(), config)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::Request(error) if error.status().map(|status| status.as_u16()) == Some(503)
+        ));
         server.abort();
     }
 }

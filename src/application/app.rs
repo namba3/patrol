@@ -56,7 +56,7 @@ where
             config_repo,
             data_repo,
             poller,
-            period: std::time::Duration::from_secs(interval_period_secs),
+            period: std::time::Duration::from_secs(interval_period_secs.max(1)),
             limit: interval_limit,
         }
     }
@@ -74,6 +74,7 @@ where
         } = self;
 
         let mut interval = tokio::time::interval(period);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut failed_ids = match data_repo.get_all().await {
             Ok(data) => data
                 .into_iter()
@@ -481,7 +482,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_returns_config_repository_errors() {
+    async fn run_clamps_zero_interval_and_returns_config_repository_errors() {
         let data_path = temp_file("config-error-data");
         let data_repo = TomlDataRepository::new(data_path.to_str().unwrap())
             .await
@@ -492,9 +493,10 @@ mod tests {
             StaticPoller {
                 contents: HashMap::new(),
             },
-            60,
+            0,
             Some(1),
         );
+        assert_eq!(app.period, std::time::Duration::from_secs(1));
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
 
         let result = app.run(tx).await;

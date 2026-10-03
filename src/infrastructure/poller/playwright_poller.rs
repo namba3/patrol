@@ -16,16 +16,15 @@ static PLAYWRIGHT: OnceCell<Playwright> = OnceCell::const_new();
 #[derive(Debug)]
 pub struct PlaywrightPoller {
     pool_size: u8,
-    client_pool: ClientPool,
+    client_pool: Arc<OnceCell<Result<ClientPool, String>>>,
 }
 
 impl PlaywrightPoller {
     pub async fn new(pool_size: u8) -> Result<Self, Error> {
         let pool_size = pool_size.max(1);
-        let client_pool = ClientPool::new(pool_size).await?;
         Ok(Self {
             pool_size,
-            client_pool,
+            client_pool: Arc::new(OnceCell::new()),
         })
     }
 }
@@ -42,7 +41,8 @@ impl Poller for PlaywrightPoller {
             wait_seconds,
             ..
         } = config;
-        let mut item = self.client_pool.get().await;
+        let mut client_pool = get_or_initialize_pool(&self.client_pool, self.pool_size).await?;
+        let mut item = client_pool.get().await;
         let client = item.client();
 
         let result = poll(client, url.as_str(), selector.as_str(), wait_seconds).await;
@@ -55,13 +55,22 @@ impl Poller for PlaywrightPoller {
     async fn poll_multiple(&mut self, configs: HashMap<Id, Config>) -> Self::Stream {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let client_pool = self.client_pool.clone();
-        let pool_size = self.pool_size as usize;
+        let page_count = self.pool_size;
+        let concurrency = usize::from(page_count);
         tokio::spawn(async move {
             stream::iter(configs)
-                .for_each_concurrent(pool_size, |(id, config)| {
-                    let mut client_pool = client_pool.clone();
+                .for_each_concurrent(concurrency, |(id, config)| {
+                    let client_pool = client_pool.clone();
                     let tx = tx.clone();
                     async move {
+                        let mut client_pool =
+                            match get_or_initialize_pool(&client_pool, page_count).await {
+                                Ok(client_pool) => client_pool,
+                                Err(error) => {
+                                    let _ = tx.send((id, Err(error)));
+                                    return;
+                                }
+                            };
                         let Config {
                             url,
                             selector,
@@ -78,7 +87,10 @@ impl Poller for PlaywrightPoller {
                         // This prevents the browser from spinning and wasting CPU resources
                         let _ = client.goto_builder("about:blank").goto().await;
 
-                        debug!("[{}]: polling succeeded", &id);
+                        match &result {
+                            Ok(_) => debug!("[{}]: polling succeeded", &id),
+                            Err(error) => debug!("[{}]: polling failed: {error}", &id),
+                        }
                         let _ = tx.send((id, result));
                     }
                 })
@@ -93,6 +105,23 @@ impl Poller for PlaywrightPoller {
     }
 }
 
+async fn get_or_initialize_pool(
+    client_pool: &OnceCell<Result<ClientPool, String>>,
+    pool_size: u8,
+) -> Result<ClientPool, Error> {
+    match client_pool
+        .get_or_init(|| async {
+            ClientPool::new(pool_size)
+                .await
+                .map_err(|error| error.to_string())
+        })
+        .await
+    {
+        Ok(client_pool) => Ok(client_pool.clone()),
+        Err(error) => Err(Error::Other(error.clone())),
+    }
+}
+
 #[derive(Debug, Clone)]
 struct ClientPool {
     lending_tabs: std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<Page>>>,
@@ -104,10 +133,14 @@ impl ClientPool {
         let (returning_tabs, lending_tabs) = tokio::sync::mpsc::unbounded_channel();
 
         let playwright = PLAYWRIGHT
-            .get_or_init(async || Playwright::initialize().await.unwrap())
-            .await;
+            .get_or_try_init(|| async {
+                Playwright::initialize()
+                    .await
+                    .map_err(|error| Error::PlaywrightError(Arc::new(error)))
+            })
+            .await?;
 
-        playwright.prepare()?; // Install browsers
+        playwright.install_chromium()?;
         let chromium = playwright.chromium();
         let browser = chromium.launcher().headless(true).launch().await?;
         let context = browser.context_builder().build().await?;
@@ -205,6 +238,19 @@ impl std::error::Error for Error {}
 impl From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Self {
         Error::IOError(e)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PlaywrightPoller;
+
+    #[tokio::test]
+    async fn defers_browser_startup_and_uses_at_least_one_page() {
+        let poller = PlaywrightPoller::new(0).await.unwrap();
+
+        assert_eq!(poller.pool_size, 1);
+        assert!(poller.client_pool.get().is_none());
     }
 }
 impl From<Arc<playwright::Error>> for Error {
