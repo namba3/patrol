@@ -18,6 +18,12 @@ pub struct Config {
     pub selector: Selector,
     pub mode: Mode,
     pub wait_seconds: Option<u16>,
+    #[serde(default)]
+    pub exclude_selectors: Vec<Selector>,
+    #[serde(default)]
+    pub normalize_whitespace: bool,
+    #[serde(default)]
+    pub poll_interval_minutes: Option<u32>,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone, Default)]

@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use futures_util::StreamExt;
 use log::{debug, info, warn};
 use prettytable::{color, row, Attr, Cell, Row, Table};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use crate::domain::{self, Duration, Timestamp};
 
@@ -33,6 +33,19 @@ pub struct DocUpdateInfo {
     pub consecutive_failures: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct DocStatus {
+    pub id: String,
+    pub url: String,
+    pub status: String,
+    pub last_updated_unix_ms: Option<i64>,
+    pub last_checked_unix_ms: Option<i64>,
+    pub last_attempted_unix_ms: Option<i64>,
+    pub last_success_unix_ms: Option<i64>,
+    pub consecutive_failures: u32,
+    pub last_error: Option<String>,
 }
 
 impl<ConfigRepository, DataRepository, Poller> App<ConfigRepository, DataRepository, Poller>
@@ -65,6 +78,15 @@ where
         self,
         tx_doc_update: mpsc::Sender<DocUpdateInfo>,
     ) -> Result<(), Error<ConfigRepository::Error, DataRepository::Error, Poller::Error>> {
+        self.run_with_status(tx_doc_update, watch::channel(Vec::new()).0)
+            .await
+    }
+
+    pub async fn run_with_status(
+        self,
+        tx_doc_update: mpsc::Sender<DocUpdateInfo>,
+        tx_status: watch::Sender<Vec<DocStatus>>,
+    ) -> Result<(), Error<ConfigRepository::Error, DataRepository::Error, Poller::Error>> {
         let Self {
             mut data_repo,
             mut config_repo,
@@ -72,6 +94,7 @@ where
             period,
             mut limit,
         } = self;
+        let poll_all_once = limit == Some(1);
 
         let mut interval = tokio::time::interval(period);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -106,7 +129,47 @@ where
                 .await
                 .map_err(Error::ConfigRepositoryError)?;
 
-            let mut rem = configs.clone();
+            let has_custom_intervals = configs
+                .values()
+                .any(|config| config.poll_interval_minutes.is_some());
+            let schedule_data = if poll_all_once || !has_custom_intervals {
+                HashMap::new()
+            } else {
+                let configured_ids = configs.keys().cloned().collect::<HashSet<_>>();
+                match data_repo.get_multiple(configured_ids).await {
+                    Ok(data) => data,
+                    Err(error) => {
+                        warn!("failed to read last-attempt times; polling all configured pages: {error}");
+                        HashMap::new()
+                    }
+                }
+            };
+            let schedule_now = Timestamp::now().unix_secs();
+            let poll_configs = configs
+                .iter()
+                .filter(|(id, config)| {
+                    let Some(minutes) = config.poll_interval_minutes else {
+                        return true;
+                    };
+                    if poll_all_once {
+                        return true;
+                    }
+                    let interval_secs = u64::from(minutes.max(1)) * 60;
+                    schedule_data
+                        .get(*id)
+                        .and_then(|data| data.last_attempted)
+                        .is_none_or(|last_attempted| {
+                            schedule_now
+                                >= last_attempted
+                                    .unix_secs()
+                                    .saturating_add(interval_secs as i64)
+                        })
+                })
+                .map(|(id, config)| (id.clone(), config.clone()))
+                .collect::<HashMap<_, _>>();
+
+            let has_poll_targets = !poll_configs.is_empty();
+            let mut rem = poll_configs;
             let mut latest_errors = HashMap::new();
             let mut successful_hashes = HashMap::new();
             let mut empty_successes = HashSet::new();
@@ -223,8 +286,12 @@ where
                 Err(error) => warn!("failed to save polling results: {error}"),
             }
 
-            let configured_ids = configs.keys().cloned().collect();
-            let data_map = data_repo.get_multiple(configured_ids).await;
+            let data_map = if has_poll_targets {
+                let configured_ids = configs.keys().cloned().collect();
+                data_repo.get_multiple(configured_ids).await
+            } else {
+                Ok(schedule_data)
+            };
             let data_map = match data_map {
                 Ok(x) => x,
                 Err(why) => {
@@ -232,6 +299,40 @@ where
                     continue;
                 }
             };
+            tx_status.send_replace(
+                configs
+                    .iter()
+                    .map(|(id, config)| {
+                        let data = data_map.get(id);
+                        DocStatus {
+                            id: id.to_string(),
+                            url: config.url.as_str().to_owned(),
+                            status: match data {
+                                Some(data) if data.consecutive_failures > 0 => "failed",
+                                Some(data) if data.last_success.is_some() => "ok",
+                                _ => "not_checked",
+                            }
+                            .to_owned(),
+                            last_updated_unix_ms: data
+                                .and_then(|data| data.last_updated)
+                                .map(|timestamp| timestamp.unix_millis()),
+                            last_checked_unix_ms: data
+                                .and_then(|data| data.last_checked)
+                                .map(|timestamp| timestamp.unix_millis()),
+                            last_attempted_unix_ms: data
+                                .and_then(|data| data.last_attempted)
+                                .map(|timestamp| timestamp.unix_millis()),
+                            last_success_unix_ms: data
+                                .and_then(|data| data.last_success)
+                                .map(|timestamp| timestamp.unix_millis()),
+                            consecutive_failures: data
+                                .map(|data| data.consecutive_failures)
+                                .unwrap_or_default(),
+                            last_error: data.and_then(|data| data.last_error.clone()),
+                        }
+                    })
+                    .collect(),
+            );
             let mut data_list: Vec<_> = configs
                 .iter()
                 .map(|(id, _)| (id, data_map.get(id)))
@@ -488,6 +589,30 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct CountingPoller(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+    #[async_trait::async_trait]
+    impl Poller for CountingPoller {
+        type Error = TestPollerError;
+        type Stream = Pin<Box<dyn Stream<Item = (Id, Result<String, Self::Error>)> + Send>>;
+
+        async fn poll(&mut self, id: Id, _config: Config) -> Result<String, Self::Error> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(id.to_string())
+        }
+
+        async fn poll_multiple(&mut self, configs: HashMap<Id, Config>) -> Self::Stream {
+            self.0
+                .fetch_add(configs.len(), std::sync::atomic::Ordering::SeqCst);
+            Box::pin(stream::iter(
+                configs
+                    .into_keys()
+                    .map(|id| (id.clone(), Ok(id.to_string()))),
+            ))
+        }
+    }
+
     fn temp_file(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("patrol-app-{name}-{}.toml", uuid::Uuid::new_v4()))
     }
@@ -528,6 +653,9 @@ mod tests {
             selector: crate::domain::Selector::new("main".to_owned()).unwrap(),
             mode: crate::domain::Mode::Simple,
             wait_seconds: None,
+            exclude_selectors: Vec::new(),
+            normalize_whitespace: false,
+            poll_interval_minutes: None,
         };
         let config_repo = ReloadingConfigRepository {
             id: id.clone(),
@@ -549,6 +677,94 @@ mod tests {
         assert_eq!(update.event, super::DocUpdateEvent::Changed);
         assert_eq!(update.url, "https://example.com/new");
 
+        std::fs::remove_file(data_path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn per_target_interval_skips_recently_attempted_pages() {
+        let data_path = temp_file("per-target-interval");
+        let id = Id::try_from("Page".to_owned()).unwrap();
+        let config = Config {
+            url: crate::domain::Url::new("https://example.com/page".to_owned()).unwrap(),
+            selector: crate::domain::Selector::new("main".to_owned()).unwrap(),
+            mode: crate::domain::Mode::Simple,
+            wait_seconds: None,
+            exclude_selectors: Vec::new(),
+            normalize_whitespace: false,
+            poll_interval_minutes: Some(30),
+        };
+        let mut data_repo = TomlDataRepository::new(data_path.to_str().unwrap())
+            .await
+            .unwrap();
+        data_repo
+            .update(id.clone(), Hash::new("existing content"))
+            .await
+            .unwrap();
+        let config_repo = ReloadingConfigRepository {
+            id: id.clone(),
+            config: config.clone(),
+            next_config: config.clone(),
+        };
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let app = App::new(
+            config_repo,
+            data_repo,
+            CountingPoller(calls.clone()),
+            1,
+            Some(2),
+        );
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let (tx_status, rx_status) = tokio::sync::watch::channel(Vec::new());
+
+        app.run_with_status(tx, tx_status).await.unwrap();
+
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let statuses = rx_status.borrow().clone();
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].status, "ok");
+        assert!(statuses[0].last_attempted_unix_ms.is_some());
+        assert!(statuses[0].last_success_unix_ms.is_some());
+        std::fs::remove_file(data_path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn once_run_polls_pages_even_when_their_interval_is_not_due() {
+        let data_path = temp_file("once-ignores-target-interval");
+        let id = Id::try_from("Page".to_owned()).unwrap();
+        let config = Config {
+            url: crate::domain::Url::new("https://example.com/page".to_owned()).unwrap(),
+            selector: crate::domain::Selector::new("main".to_owned()).unwrap(),
+            mode: crate::domain::Mode::Simple,
+            wait_seconds: None,
+            exclude_selectors: Vec::new(),
+            normalize_whitespace: false,
+            poll_interval_minutes: Some(30),
+        };
+        let mut data_repo = TomlDataRepository::new(data_path.to_str().unwrap())
+            .await
+            .unwrap();
+        data_repo
+            .update(id.clone(), Hash::new("existing content"))
+            .await
+            .unwrap();
+        let config_repo = ReloadingConfigRepository {
+            id,
+            config: config.clone(),
+            next_config: config,
+        };
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let app = App::new(
+            config_repo,
+            data_repo,
+            CountingPoller(calls.clone()),
+            60,
+            Some(1),
+        );
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+
+        app.run(tx).await.unwrap();
+
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         std::fs::remove_file(data_path).unwrap();
     }
 

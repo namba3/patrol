@@ -3,6 +3,9 @@
 url = "https://github.com/namba3/patrol"
 selector = ".Layout-sidebar .BorderGrid-cell h2 + div"
 wait_seconds = 1
+# exclude_selectors = [".timestamp", ".advertisement"]
+# normalize_whitespace = true
+# poll_interval_minutes = 15
 
 [README]
 url = "https://github.com/namba3/patrol"

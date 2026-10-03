@@ -3,7 +3,7 @@ use env_logger::Env;
 use futures::SinkExt;
 use log::{error, info};
 
-use patrol::application::app::DocUpdateInfo;
+use patrol::application::app::{DocStatus, DocUpdateInfo};
 use patrol::application::{App, SelectivePoller};
 use patrol::infrastructure::{
     HttpPoller, PlaywrightPoller, TomlConfigRepository, TomlDataRepository,
@@ -14,14 +14,14 @@ use axum::{
         ws::{WebSocket, WebSocketUpgrade},
         Extension,
     },
-    response::IntoResponse,
+    response::{Html, IntoResponse},
     routing::get,
-    Router,
+    Json, Router,
 };
 use futures::stream::StreamExt;
 use std::sync::Arc;
 use tokio::io::AsyncBufReadExt;
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::{broadcast, oneshot, watch};
 
 const DOC_UPDATE_CHANNEL_CAPACITY: usize = 128;
 
@@ -80,9 +80,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (tx_doc_update, mut rx_doc_update) =
         tokio::sync::mpsc::channel::<DocUpdateInfo>(DOC_UPDATE_CHANNEL_CAPACITY);
     let (tx, rx) = broadcast::channel(100);
-    let web_app_state = Arc::new(AppState { rx });
+    let (tx_status, status) = watch::channel(Vec::new());
+    let web_app_state = Arc::new(AppState { rx, status });
     let web_app = Router::new()
         .route("/", get(websocket_handler))
+        .route("/ui", get(web_ui))
+        .route("/api/v1/status", get(status_handler))
         .layer(Extension(web_app_state));
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
     let web_app = tokio::spawn(async { axum::serve(listener, web_app).await });
@@ -145,7 +148,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 error!("{why}")
             }
         },
-        result = patrol_app.run(tx_doc_update) => {
+        result = patrol_app.run_with_status(tx_doc_update, tx_status) => {
             if let Err(why) = result {
                 error!("{why}")
             }
@@ -158,6 +161,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[derive(Debug)]
 struct AppState {
     rx: broadcast::Receiver<String>,
+    status: watch::Receiver<Vec<DocStatus>>,
+}
+
+async fn web_ui() -> Html<&'static str> {
+    Html(include_str!("../web/index.html"))
+}
+
+async fn status_handler(Extension(state): Extension<Arc<AppState>>) -> Json<Vec<DocStatus>> {
+    Json(state.status.borrow().clone())
 }
 
 async fn websocket_handler(
@@ -194,9 +206,9 @@ async fn next_broadcast_message(rx: &mut broadcast::Receiver<String>) -> Option<
 
 #[cfg(test)]
 mod tests {
-    use patrol::application::app::{DocUpdateEvent, DocUpdateInfo};
+    use patrol::application::app::{DocStatus, DocUpdateEvent, DocUpdateInfo};
 
-    use super::next_broadcast_message;
+    use super::{next_broadcast_message, status_handler, web_ui, AppState};
 
     #[test]
     fn websocket_failure_message_includes_event_and_failure_details() {
@@ -230,5 +242,42 @@ mod tests {
 
         drop(tx);
         assert_eq!(next_broadcast_message(&mut rx).await, None);
+    }
+
+    #[tokio::test]
+    async fn status_endpoint_returns_the_latest_snapshot() {
+        let (_events_tx, events_rx) = tokio::sync::broadcast::channel(1);
+        let (status_tx, status_rx) = tokio::sync::watch::channel(vec![DocStatus {
+            id: "Page".to_owned(),
+            url: "https://example.com/page".to_owned(),
+            status: "failed".to_owned(),
+            last_updated_unix_ms: None,
+            last_checked_unix_ms: None,
+            last_attempted_unix_ms: Some(1_791_027_296_000),
+            last_success_unix_ms: None,
+            consecutive_failures: 2,
+            last_error: Some("request failed".to_owned()),
+        }]);
+        drop(status_tx);
+        let state = std::sync::Arc::new(AppState {
+            rx: events_rx,
+            status: status_rx,
+        });
+
+        let axum::Json(statuses) = status_handler(axum::Extension(state)).await;
+
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].id, "Page");
+        assert_eq!(statuses[0].status, "failed");
+        assert_eq!(statuses[0].consecutive_failures, 2);
+        assert_eq!(statuses[0].last_error.as_deref(), Some("request failed"));
+    }
+
+    #[tokio::test]
+    async fn bundled_web_ui_uses_the_status_api_and_websocket() {
+        let axum::response::Html(page) = web_ui().await;
+
+        assert!(page.contains("/api/v1/status"));
+        assert!(page.contains("new WebSocket"));
     }
 }

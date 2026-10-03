@@ -16,6 +16,8 @@ cp config.example.toml config.toml
 
 初期状態では1分ごとに巡回します。`q`を入力すると終了します。1回だけ巡回する場合は`--once`を指定してください。
 
+簡易状態画面は起動後に [http://localhost:3000/ui](http://localhost:3000/ui) で開けます。
+
 ## 資料
 
 - [資料一覧](docs/README.md)

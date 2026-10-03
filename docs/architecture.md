@@ -25,7 +25,7 @@ DomainはTOMLやHTTPクライアントといった保存・通信手段を選び
 
 ### Application — `src/application/`
 
-`App`が巡回周期、設定取得、ポーリング、ハッシュ保存、更新一覧の出力を制御します。`SelectivePoller`は`Mode`に応じてFullまたはSimpleのpollerへ処理を振り分け、複数の取得ストリームをまとめます。
+`App`が巡回周期、設定取得、ポーリング、ハッシュ保存、更新一覧の出力を制御します。`SelectivePoller`は`Mode`に応じてFullまたはSimpleのpollerへ処理を振り分け、複数の取得ストリームをまとめます。任意の対象別間隔がある場合は`last_attempted`を使って各サイクルの取得対象を選び、状態一覧を`watch`でWeb層へ渡します。
 
 `DataRepositoryActor`は容量64のbounded channelを介してリポジトリ操作を直列化する補助実装です。キューが埋まると要求元が送信完了を待ちます。現在の`main.rs`の起動経路では使用されていません。
 
@@ -39,7 +39,7 @@ DomainはTOMLやHTTPクライアントといった保存・通信手段を選び
 
 ### Composition root — `src/main.rs`
 
-CLI引数を解釈し、TOMLリポジトリと2種類のpollerを生成して`App`へ渡します。また、更新通知をWebSocketへ中継し、標準入力の`q`でプロセスを終了します。
+CLI引数を解釈し、TOMLリポジトリと2種類のpollerを生成して`App`へ渡します。状態スナップショットは`GET /api/v1/status`と`/ui`の簡易WebUIへ提供します。また、更新通知をWebSocketへ中継し、標準入力の`q`でプロセスを終了します。
 
 ## 巡回の流れ
 
@@ -54,7 +54,8 @@ CLI引数を解釈し、TOMLリポジトリと2種類のpollerを生成して`Ap
 ## 現在の境界と制約
 
 - 保存先はローカルのTOMLファイルです。DBや外部通知サービスの実装はありません。
-- WebSocket通知は変更・失敗・復旧のイベント配信です。履歴や初期状態を配信するAPIはありません。受信側がbroadcast容量100件分以上遅れると、その間の古いイベントを飛ばして配信を続けます。
+- WebSocket通知は変更・失敗・復旧のイベント配信です。履歴や初期状態をWebSocketでは配信しません。初期状態は`GET /api/v1/status`で取得できます。受信側がbroadcast容量100件分以上遅れると、その間の古いイベントを飛ばして配信を続けます。
+- `GET /api/v1/status`は最新の巡回状態スナップショットを返し、`/ui`は同じAPIとWebSocketを使う静的画面です。状態APIとWebSocketに認証はありません。
 - `mode`を省略した設定はFullとして扱われます。
 - Simpleモードは静的HTML取得向けで、ブラウザー上でのJavaScript実行はしません。
 - `src/lib.rs`がnightly featureを有効にしているため、nightly Rustが必要です。

@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Patrol status</title>
+    <style>
+      :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+      body { margin: 0 auto; max-width: 1100px; padding: 1.5rem; }
+      header { align-items: center; display: flex; flex-wrap: wrap; gap: 1rem; justify-content: space-between; }
+      h1 { margin: 0; }
+      button { cursor: pointer; font: inherit; padding: .45rem .8rem; }
+      .muted { opacity: .72; }
+      .table-wrap { overflow-x: auto; }
+      table { border-collapse: collapse; margin-top: 1rem; width: 100%; }
+      th, td { border-bottom: 1px solid #8886; padding: .65rem .5rem; text-align: left; vertical-align: top; }
+      th { white-space: nowrap; }
+      .status { font-weight: 650; }
+      .status-ok { color: #218739; }
+      .status-failed { color: #d33; }
+      .events { list-style: none; padding: 0; }
+      .events li { border-bottom: 1px solid #8886; padding: .5rem 0; overflow-wrap: anywhere; }
+      code { overflow-wrap: anywhere; }
+      @media (max-width: 650px) { body { padding: 1rem; } th, td { padding: .5rem .35rem; } }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div>
+        <h1>Patrol</h1>
+        <p id="connection" class="muted">状態を読み込み中…</p>
+      </div>
+      <button id="refresh" type="button">状態を更新</button>
+    </header>
+
+    <main>
+      <section aria-labelledby="status-heading">
+        <h2 id="status-heading">巡回対象</h2>
+        <p id="updated" class="muted"></p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>対象</th><th>状態</th><th>最終試行</th><th>最終成功</th><th>最終変更</th><th>エラー</th></tr>
+            </thead>
+            <tbody id="status-rows"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section aria-labelledby="events-heading">
+        <h2 id="events-heading">最近の通知</h2>
+        <p class="muted">このページを開いている間に届いた通知を表示します。</p>
+        <ul id="events" class="events"></ul>
+      </section>
+    </main>
+
+    <script>
+      const rows = document.querySelector("#status-rows");
+      const connection = document.querySelector("#connection");
+      const updated = document.querySelector("#updated");
+      const events = document.querySelector("#events");
+
+      function cell(value, className) {
+        const element = document.createElement("td");
+        element.textContent = value;
+        if (className) element.className = className;
+        return element;
+      }
+
+      function formatTime(unixMillis) {
+        return unixMillis == null ? "—" : new Date(unixMillis).toLocaleString();
+      }
+
+      async function refreshStatus() {
+        try {
+          const response = await fetch("/api/v1/status", { cache: "no-store" });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const statusList = await response.json();
+          rows.replaceChildren();
+          for (const item of statusList) {
+            const row = document.createElement("tr");
+            const name = document.createElement("td");
+            name.textContent = item.id;
+            const url = document.createElement("div");
+            url.className = "muted";
+            url.textContent = item.url;
+            name.append(url);
+            row.append(name);
+            const label = item.status === "ok" ? "正常" : item.status === "failed" ? `失敗 (${item.consecutive_failures})` : "未確認";
+            row.append(cell(label, `status status-${item.status}`));
+            row.append(cell(formatTime(item.last_attempted_unix_ms)));
+            row.append(cell(formatTime(item.last_success_unix_ms)));
+            row.append(cell(formatTime(item.last_updated_unix_ms)));
+            row.append(cell(item.last_error ?? ""));
+            rows.append(row);
+          }
+          updated.textContent = `更新: ${new Date().toLocaleTimeString()} ・ ${statusList.length} 件`;
+          connection.textContent = "状態APIに接続中";
+        } catch (error) {
+          connection.textContent = `状態を取得できません: ${error.message}`;
+        }
+      }
+
+      function connectEvents() {
+        const scheme = location.protocol === "https:" ? "wss:" : "ws:";
+        const socket = new WebSocket(`${scheme}//${location.host}/`);
+        socket.onopen = () => { connection.textContent = "状態APIとWebSocketに接続中"; };
+        socket.onmessage = (message) => {
+          let event;
+          try { event = JSON.parse(message.data); } catch { return; }
+          const item = document.createElement("li");
+          item.textContent = `${new Date().toLocaleTimeString()}  ${event.event}  ${event.id}  ${event.error ?? ""}`;
+          events.prepend(item);
+          while (events.children.length > 20) events.lastElementChild.remove();
+          refreshStatus();
+        };
+        socket.onclose = () => {
+          connection.textContent = "WebSocketを再接続しています…";
+          setTimeout(connectEvents, 3000);
+        };
+        socket.onerror = () => socket.close();
+      }
+
+      document.querySelector("#refresh").addEventListener("click", refreshStatus);
+      refreshStatus();
+      setInterval(refreshStatus, 15000);
+      connectEvents();
+    </script>
+  </body>
+</html>

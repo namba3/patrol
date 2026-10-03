@@ -21,6 +21,7 @@
 - `DataRepository::update`は内容が変わった場合に更新時刻を返し、同じ内容なら`None`を返します。
 - `DataRepository::update_multiple`は複数のハッシュをまとめて保存します。変更時刻が必要な呼び出し側は`update_multiple_with_timestamps`を使います。既定実装は既存のtrait実装との互換性を保つため、更新前後の読み取りから変更時刻を求めます。TOML実装はまとめて保存し、ファイル書き込みを1回にします。
 - `DataRepository::record_failure`は対象の連続失敗数と直近エラーを保存します。複数の失敗を処理する場合は`record_failures`を使います。成功時の`update`または`record_success`で失敗状態を消去します。
+- `Config`は任意の`exclude_selectors`、`normalize_whitespace`、`poll_interval_minutes`を持ちます。TOMLでは省略可能で、除外・正規化を無効、巡回間隔を全体設定にする既定値を保ちます。
 - `App`は空の取得内容を保存しません。抽出結果の正規化を変える場合は、既存の記録との比較結果にも影響することを考慮します。
 - `App`は各巡回結果を`record_poll_results`でまとめて保存し、保存成功後に変更・失敗・復旧イベントを送ります。既定実装は既存の単件APIへ委譲し、TOML実装では巡回あたり最大1回のファイル書き込みです。保存失敗時はそれらのイベントを送りません。
 - 空の取得結果は成功状態だけを記録し、`hash`と`last_checked`は更新しません。
@@ -28,6 +29,7 @@
 - アプリケーションからWebSocket中継タスクへの通知キューは容量128のbounded channelです。配信が遅れた場合は巡回処理が送信を待ち、キューが無制限に増えるのを防ぎます。
 - `DataRepositoryActor`の要求キューは容量64のbounded channelです。キューが埋まると呼び出し側が送信を待ちます。このactorは現在の`main.rs`の起動経路では使用されていません。
 - `PlaywrightPoller`の結果キュー容量はブラウザーページ数と同じです。結果の消費が遅いときは、並列巡回を続けずにキューの空きを待ちます。
+- `App::run_with_status`は巡回後の状態一覧を`watch`で公開します。HTTP status APIとWebUIはこのスナップショットを参照します。
 - TOMLリポジトリはメモリ上のキャッシュを更新して保存します。データファイルは起動時に読み込まれ、稼働中の外部編集は自動再読込されません。
 - 設定リポジトリは各巡回サイクルの開始時に再読込します。不正なファイルは最後に有効だった設定を維持してエラーを返します。
 

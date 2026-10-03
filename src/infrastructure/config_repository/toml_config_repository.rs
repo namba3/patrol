@@ -16,6 +16,12 @@ struct TomlConfig {
     selector: Selector,
     mode: Option<Mode>,
     wait_seconds: Option<u16>,
+    #[serde(default)]
+    exclude_selectors: Vec<Selector>,
+    #[serde(default)]
+    normalize_whitespace: bool,
+    #[serde(default)]
+    poll_interval_minutes: Option<u32>,
 }
 impl From<Config> for TomlConfig {
     fn from(c: Config) -> Self {
@@ -24,12 +30,18 @@ impl From<Config> for TomlConfig {
             selector,
             mode,
             wait_seconds,
+            exclude_selectors,
+            normalize_whitespace,
+            poll_interval_minutes,
         } = c;
         Self {
             url,
             selector,
             mode: mode.into(),
             wait_seconds,
+            exclude_selectors,
+            normalize_whitespace,
+            poll_interval_minutes,
         }
     }
 }
@@ -40,12 +52,18 @@ impl Into<Config> for TomlConfig {
             selector,
             mode,
             wait_seconds,
+            exclude_selectors,
+            normalize_whitespace,
+            poll_interval_minutes,
         } = self;
         Config {
             url,
             selector,
             mode: mode.unwrap_or_default(),
             wait_seconds,
+            exclude_selectors,
+            normalize_whitespace,
+            poll_interval_minutes,
         }
     }
 }
@@ -231,6 +249,9 @@ wait_seconds = 3
 
         assert_eq!(default.mode, Mode::Full);
         assert_eq!(default.wait_seconds, None);
+        assert!(default.exclude_selectors.is_empty());
+        assert!(!default.normalize_whitespace);
+        assert_eq!(default.poll_interval_minutes, None);
         assert_eq!(simple.mode, Mode::Simple);
         assert_eq!(simple.wait_seconds, Some(3));
 
@@ -326,6 +347,9 @@ wait_seconds = 3
             selector: crate::domain::Selector::new(".content".to_owned()).unwrap(),
             mode: Mode::Simple,
             wait_seconds: Some(5),
+            exclude_selectors: vec![crate::domain::Selector::new(".ads".to_owned()).unwrap()],
+            normalize_whitespace: true,
+            poll_interval_minutes: Some(15),
         };
 
         repository
@@ -337,6 +361,9 @@ wait_seconds = 3
         assert_eq!(updated[&id].selector.as_str(), ".content");
         assert_eq!(updated[&id].mode, Mode::Simple);
         assert_eq!(updated[&id].wait_seconds, Some(5));
+        assert_eq!(updated[&id].exclude_selectors[0].as_str(), ".ads");
+        assert!(updated[&id].normalize_whitespace);
+        assert_eq!(updated[&id].poll_interval_minutes, Some(15));
 
         let deleted = repository.delete(id.clone()).await.unwrap().unwrap();
         assert_eq!(deleted.url, replacement.url);

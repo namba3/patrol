@@ -193,6 +193,9 @@ mod tests {
             selector: Selector::new("main".to_owned()).unwrap(),
             mode,
             wait_seconds: None,
+            exclude_selectors: Vec::new(),
+            normalize_whitespace: false,
+            poll_interval_minutes: None,
         }
     }
 

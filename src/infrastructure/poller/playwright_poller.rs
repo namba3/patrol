@@ -8,6 +8,7 @@ use playwright::{
 };
 
 use crate::domain::{Config, Id, Poller};
+use crate::infrastructure::poller::normalize_whitespace;
 
 use tokio::sync::OnceCell;
 
@@ -39,13 +40,23 @@ impl Poller for PlaywrightPoller {
             url,
             selector,
             wait_seconds,
+            exclude_selectors,
+            normalize_whitespace: normalize,
             ..
         } = config;
         let mut client_pool = get_or_initialize_pool(&self.client_pool, self.pool_size).await?;
         let mut item = client_pool.get().await;
         let client = item.client();
 
-        let result = poll(client, url.as_str(), selector.as_str(), wait_seconds).await;
+        let result = poll(
+            client,
+            url.as_str(),
+            selector.as_str(),
+            wait_seconds,
+            &exclude_selectors,
+            normalize,
+        )
+        .await;
 
         // This prevents the browser from spinning and wasting CPU resources
         let _ = client.goto_builder("about:blank").goto().await;
@@ -75,14 +86,23 @@ impl Poller for PlaywrightPoller {
                             url,
                             selector,
                             wait_seconds,
+                            exclude_selectors,
+                            normalize_whitespace: normalize,
                             ..
                         } = config;
                         let mut item = client_pool.get().await;
                         let client = item.client();
                         debug!("[{}]: start polling {}", &id, url.as_str());
-                        let result = poll(client, url.as_str(), selector.as_str(), wait_seconds)
-                            .await
-                            .map_err(Error::from);
+                        let result = poll(
+                            client,
+                            url.as_str(),
+                            selector.as_str(),
+                            wait_seconds,
+                            &exclude_selectors,
+                            normalize,
+                        )
+                        .await
+                        .map_err(Error::from);
 
                         // This prevents the browser from spinning and wasting CPU resources
                         let _ = client.goto_builder("about:blank").goto().await;
@@ -188,6 +208,8 @@ async fn poll(
     url: &str,
     selector: &str,
     wait_seconds: Option<u16>,
+    exclude_selectors: &[crate::domain::Selector],
+    normalize: bool,
 ) -> Result<String, Error> {
     let _resp = page.goto_builder(url).goto().await?.ok_or(Error::Unknown)?;
 
@@ -208,9 +230,23 @@ async fn poll(
     let elem = tokio::time::timeout(timeout, fut)
         .await??
         .ok_or(Error::Unknown)?;
-    let content = elem.inner_text().await?;
+    if exclude_selectors.is_empty() {
+        return Ok(normalize_whitespace(elem.inner_text().await?, normalize));
+    }
 
-    Ok(content)
+    let excluded = exclude_selectors
+        .iter()
+        .map(|selector| selector.as_str().to_owned())
+        .collect::<Vec<_>>();
+    let content: String = page
+        .evaluate_on_selector(
+            selector,
+            "(element, selectors) => { const copy = element.cloneNode(true); for (const selector of selectors) copy.querySelectorAll(selector).forEach(node => node.remove()); return copy.innerText; }",
+            Some(excluded),
+        )
+        .await?;
+
+    Ok(normalize_whitespace(content, normalize))
 }
 
 #[derive(Debug)]

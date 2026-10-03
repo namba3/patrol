@@ -44,6 +44,9 @@ url = "https://example.com/project"
 selector = "main article"
 mode = "full"
 wait_seconds = 2
+# exclude_selectors = [".timestamp", ".advertisement"]
+# normalize_whitespace = true
+# poll_interval_minutes = 15
 
 [StaticPage]
 url = "https://example.com/status"
@@ -57,8 +60,15 @@ mode = "simple"
 | `selector` | はい | 抽出する要素を指定するCSSセレクター |
 | `mode` | いいえ | `full`または`simple`。省略時は`full` |
 | `wait_seconds` | いいえ | Fullモードでセレクターを待つ前に加える待機時間（秒）。セレクター待機自体は最大30秒 |
+| `exclude_selectors` | いいえ | 抽出対象要素の内側から除外するCSSセレクターの配列。省略時は除外しません |
+| `normalize_whitespace` | いいえ | `true`の場合、抽出テキスト内の連続する空白・改行を1つの半角スペースにまとめます。省略時は`false` |
+| `poll_interval_minutes` | いいえ | この対象の巡回間隔（分）。省略時はCLIの`--interval-minutes`を使います。最小値は1分で、全体の巡回周期より短い値も全体周期ごとの判定になります |
 
 URLとCSSセレクターは設定読込時に形式を検査します。SimpleモードはHTTPでHTMLを取得してセレクターに一致する要素のテキストを抽出します。FullモードはヘッドレスChromiumを使うため、JavaScriptで描画されるページに向いています。`wait_seconds`はFullモードでのみ使われます。
+
+`exclude_selectors`は各抽出対象要素の子孫に適用され、一致した要素とその内容を取り除きます。抽出対象要素自身は除外対象になりません。`normalize_whitespace`は抽出後の文字列に適用されるため、見た目上の空白や改行の差による変更通知を抑えられます。どちらも省略時は従来の比較方法を保ちます。これらを有効化または変更すると比較対象の文字列が変わるため、次回取得で一度`changed`通知が送られる場合があります。
+
+`poll_interval_minutes`を指定すると、その対象の最終試行時刻から指定時間が経過した巡回サイクルで取得します。まだ試行していない対象は次のサイクルで取得します。値を省略した対象は、従来どおり毎回の全体サイクルで取得します。`--once`は対象別間隔に関係なく全対象を一度ずつ取得します。
 
 ## 保存と変更判定
 
@@ -93,3 +103,27 @@ URLとCSSセレクターは設定読込時に形式を検査します。Simple�
 ```
 
 状態の保存に成功した後、イベントを接続中のクライアントへ配信します。空でない取得結果の保存は巡回内でまとめて行うため、`changed`と`poll_recovered`はその保存後に届きます。接続時点の状態一覧や過去イベントは送信しません。クライアントの受信が大きく遅れた場合は、直近100件より古いイベントを飛ばして配信を続けます。失敗状態は`data.toml`から起動時に復元するため、再起動後に復旧した場合も通知します。時刻文字列はプロセスのローカルタイムゾーンで表示されます。
+
+## WebUIと状態API
+
+簡易WebUIは`http://localhost:3000/ui`で開けます。巡回状態は15秒ごとに再取得され、開いている間に届いたWebSocket通知も表示します。
+
+`GET /api/v1/status`は設定対象の現在状態をJSON配列で返します。時刻はUnixミリ秒です。
+
+```json
+[
+  {
+    "id": "ProjectReadme",
+    "url": "https://example.com/project",
+    "status": "ok",
+    "last_updated_unix_ms": 1791027296000,
+    "last_checked_unix_ms": 1791027296000,
+    "last_attempted_unix_ms": 1791027296000,
+    "last_success_unix_ms": 1791027296000,
+    "consecutive_failures": 0,
+    "last_error": null
+  }
+]
+```
+
+状態APIとWebSocketには認証がありません。既定のサーバーは全インターフェースで待ち受けるため、信頼できるネットワーク内で利用してください。

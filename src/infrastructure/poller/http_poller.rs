@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 
 use futures_util::{stream, Stream, StreamExt};
@@ -6,6 +6,7 @@ use reqwest::Client;
 use scraper::Html;
 
 use crate::domain::{Config, Id, Poller};
+use crate::infrastructure::poller::normalize_whitespace;
 
 #[derive(Debug)]
 pub struct HttpPoller {
@@ -44,15 +45,23 @@ impl Poller for HttpPoller {
 }
 
 async fn poll(client: &Client, config: Config) -> Result<String, Error> {
-    let Config { url, selector, .. } = config;
+    let Config {
+        url,
+        selector,
+        exclude_selectors,
+        normalize_whitespace: normalize,
+        ..
+    } = config;
 
     let response = client.get(url.as_str()).send().await?.error_for_status()?;
     let txt = response.text().await?;
     let selector = selector.parsed();
 
-    tokio::task::spawn_blocking(move || extract_text(&txt, &selector))
-        .await
-        .map_err(Error::HtmlExtraction)
+    tokio::task::spawn_blocking(move || {
+        normalize_whitespace(extract_text(&txt, &selector, &exclude_selectors), normalize)
+    })
+    .await
+    .map_err(Error::HtmlExtraction)
 }
 
 #[derive(Debug)]
@@ -85,23 +94,55 @@ impl From<reqwest::Error> for Error {
     }
 }
 
-fn extract_text(html: &str, selector: &scraper::Selector) -> String {
+fn extract_text(
+    html: &str,
+    selector: &scraper::Selector,
+    exclude_selectors: &[crate::domain::Selector],
+) -> String {
     let doc = Html::parse_document(html);
 
     let mut content = String::new();
-    for text in doc.select(selector).flat_map(|element| element.text()) {
-        let text = text.trim();
-        if text.is_empty() {
+    for element in doc.select(selector) {
+        if exclude_selectors.is_empty() {
+            for text in element.text() {
+                append_text(&mut content, text);
+            }
             continue;
         }
 
-        if !content.is_empty() {
-            content.push('\n');
+        let mut excluded_nodes = HashSet::new();
+        for selector in exclude_selectors {
+            let parsed_selector = selector.parsed();
+            excluded_nodes.extend(element.select(&parsed_selector).map(|element| element.id()));
         }
-        content.push_str(text);
+
+        for node in element.descendants() {
+            let Some(text) = node.value().as_text() else {
+                continue;
+            };
+            if node
+                .ancestors()
+                .any(|ancestor| excluded_nodes.contains(&ancestor.id()))
+            {
+                continue;
+            }
+
+            append_text(&mut content, text);
+        }
     }
 
     content
+}
+
+fn append_text(content: &mut String, text: &str) {
+    let text = text.trim();
+    if text.is_empty() {
+        return;
+    }
+    if !content.is_empty() {
+        content.push('\n');
+    }
+    content.push_str(text);
 }
 
 #[cfg(test)]
@@ -147,7 +188,7 @@ mod tests {
 "#;
 
         assert_eq!(
-            extract_text(html, &selector.parsed()),
+            extract_text(html, &selector.parsed(), &[]),
             "first\nsecond\nnested"
         );
     }
@@ -156,8 +197,32 @@ mod tests {
     fn returns_empty_text_when_selector_has_no_matches() {
         let selector = Selector::new(".missing".to_owned()).unwrap();
         assert_eq!(
-            extract_text("<main><p>content</p></main>", &selector.parsed()),
+            extract_text("<main><p>content</p></main>", &selector.parsed(), &[]),
             ""
+        );
+    }
+
+    #[test]
+    fn excludes_matching_descendants_from_selected_content() {
+        let selector = Selector::new("main".to_owned()).unwrap();
+        let excluded = Selector::new(".timestamp".to_owned()).unwrap();
+        let html = "<main><p>Updated <time class=\"timestamp\">today</time></p><p>Body</p></main>";
+
+        assert_eq!(
+            extract_text(html, &selector.parsed(), &[excluded]),
+            "Updated\nBody"
+        );
+    }
+
+    #[test]
+    fn whitespace_normalization_collapses_runs() {
+        assert_eq!(
+            super::super::normalize_whitespace("  one\n\t two   three  ".to_owned(), true),
+            "one two three"
+        );
+        assert_eq!(
+            super::super::normalize_whitespace("one\n two".to_owned(), false),
+            "one\n two"
         );
     }
 
@@ -185,6 +250,9 @@ mod tests {
                         selector: Selector::new("p".to_owned()).unwrap(),
                         mode: Mode::Simple,
                         wait_seconds: None,
+                        exclude_selectors: Vec::new(),
+                        normalize_whitespace: false,
+                        poll_interval_minutes: None,
                     },
                 )
             })
@@ -219,6 +287,9 @@ mod tests {
             selector: Selector::new("body".to_owned()).unwrap(),
             mode: Mode::Simple,
             wait_seconds: None,
+            exclude_selectors: Vec::new(),
+            normalize_whitespace: false,
+            poll_interval_minutes: None,
         };
         let mut poller = HttpPoller::new(1);
 
