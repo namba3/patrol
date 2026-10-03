@@ -310,4 +310,86 @@ mode = "simple"
         std::fs::remove_file(config_path).unwrap();
         std::fs::remove_file(data_path).unwrap();
     }
+
+    #[tokio::test]
+    async fn run_does_not_notify_when_content_is_unchanged() {
+        let config_path = temp_file("unchanged-config");
+        let data_path = temp_file("unchanged-data");
+        std::fs::write(
+            &config_path,
+            "[Page]\nurl = \"https://example.com/page\"\nselector = \"main\"\nmode = \"simple\"\n",
+        )
+        .unwrap();
+
+        let config_path_string = config_path.to_str().unwrap();
+        let data_path_string = data_path.to_str().unwrap();
+        let id = Id::try_from("Page".to_owned()).unwrap();
+        let hash = Hash::new("same content");
+
+        let mut seed_repo = TomlDataRepository::new(data_path_string).await.unwrap();
+        assert!(seed_repo
+            .update(id.clone(), hash.clone())
+            .await
+            .unwrap()
+            .is_some());
+        drop(seed_repo);
+
+        let mut before_repo = TomlDataRepository::new(data_path_string).await.unwrap();
+        let before = before_repo.get(id.clone()).await.unwrap().unwrap();
+        drop(before_repo);
+
+        let config_repo = TomlConfigRepository::new(config_path_string).await.unwrap();
+        let data_repo = TomlDataRepository::new(data_path_string).await.unwrap();
+        let poller = StaticPoller {
+            contents: HashMap::from([(id.clone(), Ok(" same content ".to_owned()))]),
+        };
+        let app = App::new(config_repo, data_repo, poller, 60, Some(1));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        app.run(tx).await.unwrap();
+
+        assert!(rx.try_recv().is_err());
+
+        let mut after_repo = TomlDataRepository::new(data_path_string).await.unwrap();
+        let after = after_repo.get(id).await.unwrap().unwrap();
+        assert_eq!(after.hash, Some(hash));
+        assert_eq!(after.last_updated, before.last_updated);
+        assert!(after.last_checked >= before.last_checked);
+
+        drop(after_repo);
+        std::fs::remove_file(config_path).unwrap();
+        std::fs::remove_file(data_path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn run_does_not_persist_or_notify_failed_polls() {
+        let config_path = temp_file("failed-config");
+        let data_path = temp_file("failed-data");
+        std::fs::write(
+            &config_path,
+            "[FailedPage]\nurl = \"https://example.com/failed\"\nselector = \"main\"\nmode = \"simple\"\n",
+        )
+        .unwrap();
+
+        let config_path_string = config_path.to_str().unwrap();
+        let data_path_string = data_path.to_str().unwrap();
+        let id = Id::try_from("FailedPage".to_owned()).unwrap();
+        let config_repo = TomlConfigRepository::new(config_path_string).await.unwrap();
+        let data_repo = TomlDataRepository::new(data_path_string).await.unwrap();
+        let poller = StaticPoller {
+            contents: HashMap::from([(id.clone(), Err(TestPollerError))]),
+        };
+        let app = App::new(config_repo, data_repo, poller, 60, Some(1));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        app.run(tx).await.unwrap();
+
+        assert!(rx.try_recv().is_err());
+        let mut data_repo = TomlDataRepository::new(data_path_string).await.unwrap();
+        assert!(data_repo.get(id).await.unwrap().is_none());
+
+        drop(data_repo);
+        std::fs::remove_file(config_path).unwrap();
+        std::fs::remove_file(data_path).unwrap();
+    }
 }
