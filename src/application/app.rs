@@ -208,13 +208,18 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, fmt::Display, path::PathBuf, pin::Pin};
+    use std::{
+        collections::{HashMap, HashSet},
+        fmt::Display,
+        path::PathBuf,
+        pin::Pin,
+    };
 
     use futures_util::{stream, Stream};
 
     use crate::{
         application::App,
-        domain::{Config, ConfigRepository, DataRepository, Hash, Id, Poller},
+        domain::{Config, ConfigRepository, Data, DataRepository, Hash, Id, Poller, Timestamp},
         infrastructure::{TomlConfigRepository, TomlDataRepository},
     };
 
@@ -245,6 +250,40 @@ mod tests {
 
         async fn delete(&mut self, _id: Id) -> Result<Option<Config>, Self::Error> {
             Err(TestPollerError)
+        }
+    }
+
+    struct FailingUpdateRepository;
+
+    #[async_trait::async_trait]
+    impl DataRepository for FailingUpdateRepository {
+        type Error = TestPollerError;
+
+        async fn get(&mut self, _id: Id) -> Result<Option<Data>, Self::Error> {
+            Ok(None)
+        }
+
+        async fn get_multiple(
+            &mut self,
+            _ids: HashSet<Id>,
+        ) -> Result<HashMap<Id, Data>, Self::Error> {
+            Ok(HashMap::new())
+        }
+
+        async fn get_all(&mut self) -> Result<HashMap<Id, Data>, Self::Error> {
+            Ok(HashMap::new())
+        }
+
+        async fn update(&mut self, _id: Id, _hash: Hash) -> Result<Option<Timestamp>, Self::Error> {
+            Err(TestPollerError)
+        }
+
+        async fn update_multiple(&mut self, _map: HashMap<Id, Hash>) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        async fn delete(&mut self, _id: Id) -> Result<Option<Data>, Self::Error> {
+            Ok(None)
         }
     }
 
@@ -329,6 +368,35 @@ mod tests {
             Err(super::Error::ConfigRepositoryError(_))
         ));
         std::fs::remove_file(data_path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn run_does_not_notify_when_persisting_a_change_fails() {
+        let config_path = temp_file("update-error-config");
+        std::fs::write(
+            &config_path,
+            "[Page]\nurl = \"https://example.com/page\"\nselector = \"main\"\nmode = \"simple\"\n",
+        )
+        .unwrap();
+        let config_repo = TomlConfigRepository::new(config_path.to_str().unwrap())
+            .await
+            .unwrap();
+        let id = Id::try_from("Page".to_owned()).unwrap();
+        let app = App::new(
+            config_repo,
+            FailingUpdateRepository,
+            StaticPoller {
+                contents: HashMap::from([(id, Ok("new content".to_owned()))]),
+            },
+            60,
+            Some(1),
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        app.run(tx).await.unwrap();
+
+        assert!(rx.try_recv().is_err());
+        std::fs::remove_file(config_path).unwrap();
     }
 
     #[tokio::test]
