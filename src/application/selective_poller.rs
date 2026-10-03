@@ -249,6 +249,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn poll_multiple_errors_identify_each_selected_poller() {
+        let mut poller = SelectivePoller::new(
+            MockPoller {
+                name: "full",
+                fail: true,
+            },
+            MockPoller {
+                name: "simple",
+                fail: true,
+            },
+        );
+        let full_id = id("full-page");
+        let simple_id = id("simple-page");
+        let configs = HashMap::from([
+            (full_id.clone(), config(Mode::Full)),
+            (simple_id.clone(), config(Mode::Simple)),
+        ]);
+
+        let results = poller
+            .poll_multiple(configs)
+            .await
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+
+        assert!(matches!(
+            &results[&full_id],
+            Err(Error::FullModePollerError(_))
+        ));
+        assert!(matches!(
+            &results[&simple_id],
+            Err(Error::SimpleModePollerError(_))
+        ));
+    }
+
+    #[tokio::test]
     async fn poll_errors_identify_the_selected_poller() {
         let mut poller = SelectivePoller::new(
             MockPoller {

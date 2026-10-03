@@ -138,8 +138,12 @@ pub enum Error {
     SelectorParseError(SelectorParseError),
 }
 impl Display for Error {
-    fn fmt(&self, _f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        todo!()
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::TomlProxyError(error) => write!(f, "TOML file error: {error}"),
+            Error::UrlParseError(error) => write!(f, "URL parse error: {error}"),
+            Error::SelectorParseError(error) => write!(f, "selector parse error: {error}"),
+        }
     }
 }
 impl std::error::Error for Error {}
@@ -165,13 +169,30 @@ mod tests {
 
     use crate::domain::{ConfigRepository, Id, Mode};
 
-    use super::TomlConfigRepository;
+    use super::{Error, TomlConfigRepository};
 
     fn temp_config_path() -> PathBuf {
         std::env::temp_dir().join(format!(
             "patrol-config-repository-{}.toml",
             uuid::Uuid::new_v4()
         ))
+    }
+
+    #[test]
+    fn repository_errors_have_readable_display_messages() {
+        assert_eq!(
+            Error::TomlProxyError(crate::infrastructure::toml_file_proxy::Error::CacheEmpty)
+                .to_string(),
+            "TOML file error: Cache is empty."
+        );
+        assert_eq!(
+            Error::UrlParseError(crate::domain::url::UrlParseError).to_string(),
+            "URL parse error: failed to parse the URL."
+        );
+        assert_eq!(
+            Error::SelectorParseError(crate::domain::selector::SelectorParseError).to_string(),
+            "selector parse error: failed to parse the selector."
+        );
     }
 
     #[tokio::test]
