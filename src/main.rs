@@ -12,9 +12,10 @@ use patrol::infrastructure::{
 use axum::{
     extract::{
         ws::{WebSocket, WebSocketUpgrade},
-        Extension,
+        Extension, Query,
     },
-    response::{Html, IntoResponse},
+    http::StatusCode,
+    response::{Html, IntoResponse, Response},
     routing::get,
     Json, Router,
 };
@@ -174,17 +175,65 @@ async fn status_handler(Extension(state): Extension<Arc<AppState>>) -> Json<Vec<
 
 async fn websocket_handler(
     ws: WebSocketUpgrade,
+    Query(filter): Query<WebSocketFilter>,
     Extension(state): Extension<Arc<AppState>>,
-) -> impl IntoResponse {
-    ws.on_upgrade(|socket| websocket(socket, state))
+) -> Response {
+    if !filter.has_valid_event() {
+        return (
+            StatusCode::BAD_REQUEST,
+            "event must be changed, poll_failed, or poll_recovered",
+        )
+            .into_response();
+    }
+
+    ws.on_upgrade(|socket| websocket(socket, state, filter))
+        .into_response()
 }
 
-async fn websocket(stream: WebSocket, state: Arc<AppState>) {
+#[derive(Debug, Default, serde::Deserialize)]
+struct WebSocketFilter {
+    id: Option<String>,
+    event: Option<String>,
+}
+
+impl WebSocketFilter {
+    fn has_valid_event(&self) -> bool {
+        self.event
+            .as_deref()
+            .is_none_or(|event| matches!(event, "changed" | "poll_failed" | "poll_recovered"))
+    }
+
+    fn matches(&self, message: &str) -> bool {
+        if self.id.is_none() && self.event.is_none() {
+            return true;
+        }
+
+        let Ok(message) = serde_json::from_str::<NotificationFilterFields>(message) else {
+            return false;
+        };
+        self.id.as_deref().is_none_or(|id| id == message.id)
+            && self
+                .event
+                .as_deref()
+                .is_none_or(|event| event == message.event)
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct NotificationFilterFields {
+    id: String,
+    event: String,
+}
+
+async fn websocket(stream: WebSocket, state: Arc<AppState>, filter: WebSocketFilter) {
     let (mut sender, _receiver) = stream.split();
 
     let mut rx = state.rx.resubscribe();
 
     while let Some(msg) = next_broadcast_message(&mut rx).await {
+        if !filter.matches(&msg) {
+            continue;
+        }
         if let Err(why) = sender.send(msg.into()).await {
             log::warn!("failed to send a WebSocket message: {why}");
             break;
@@ -208,7 +257,7 @@ async fn next_broadcast_message(rx: &mut broadcast::Receiver<String>) -> Option<
 mod tests {
     use patrol::application::app::{DocStatus, DocUpdateEvent, DocUpdateInfo};
 
-    use super::{next_broadcast_message, status_handler, web_ui, AppState};
+    use super::{next_broadcast_message, status_handler, web_ui, AppState, WebSocketFilter};
 
     #[test]
     fn websocket_failure_message_includes_event_and_failure_details() {
@@ -279,5 +328,35 @@ mod tests {
 
         assert!(page.contains("/api/v1/status"));
         assert!(page.contains("new WebSocket"));
+        assert!(page.contains("event-type"));
+    }
+
+    #[test]
+    fn websocket_filter_matches_target_and_event() {
+        let message =
+            r#"{"event":"poll_failed","id":"Page","url":"https://example.com","timestamp":"now"}"#;
+        let filter = WebSocketFilter {
+            id: Some("Page".to_owned()),
+            event: Some("poll_failed".to_owned()),
+        };
+
+        assert!(filter.has_valid_event());
+        assert!(filter.matches(message));
+        assert!(!WebSocketFilter {
+            id: Some("OtherPage".to_owned()),
+            event: Some("poll_failed".to_owned()),
+        }
+        .matches(message));
+        assert!(!WebSocketFilter {
+            id: None,
+            event: Some("changed".to_owned()),
+        }
+        .matches(message));
+        assert!(!WebSocketFilter {
+            id: None,
+            event: Some("unknown".to_owned()),
+        }
+        .has_valid_event());
+        assert!(WebSocketFilter::default().matches(message));
     }
 }

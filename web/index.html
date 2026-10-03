@@ -50,6 +50,18 @@
       <section aria-labelledby="events-heading">
         <h2 id="events-heading">最近の通知</h2>
         <p class="muted">このページを開いている間に届いた通知を表示します。</p>
+        <div>
+          <label for="event-id">対象</label>
+          <select id="event-id"><option value="">すべて</option></select>
+          <label for="event-type">イベント</label>
+          <select id="event-type">
+            <option value="">すべて</option>
+            <option value="changed">内容変更</option>
+            <option value="poll_failed">巡回失敗</option>
+            <option value="poll_recovered">巡回復旧</option>
+          </select>
+          <button id="apply-filter" type="button">通知を絞り込む</button>
+        </div>
         <ul id="events" class="events"></ul>
       </section>
     </main>
@@ -59,6 +71,10 @@
       const connection = document.querySelector("#connection");
       const updated = document.querySelector("#updated");
       const events = document.querySelector("#events");
+      const idFilter = document.querySelector("#event-id");
+      const eventFilter = document.querySelector("#event-type");
+      let eventSocket;
+      let reconnectTimer;
 
       function cell(value, className) {
         const element = document.createElement("td");
@@ -76,6 +92,20 @@
           const response = await fetch("/api/v1/status", { cache: "no-store" });
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
           const statusList = await response.json();
+          const selectedId = idFilter.value;
+          const allOption = document.createElement("option");
+          allOption.value = "";
+          allOption.textContent = "すべて";
+          idFilter.replaceChildren(allOption);
+          for (const item of statusList) {
+            const option = document.createElement("option");
+            option.value = item.id;
+            option.textContent = item.id;
+            idFilter.append(option);
+          }
+          const selectedIdExists = statusList.some((item) => item.id === selectedId);
+          idFilter.value = selectedIdExists ? selectedId : "";
+          if (selectedId && !selectedIdExists) restartEvents();
           rows.replaceChildren();
           for (const item of statusList) {
             const row = document.createElement("tr");
@@ -103,7 +133,12 @@
 
       function connectEvents() {
         const scheme = location.protocol === "https:" ? "wss:" : "ws:";
-        const socket = new WebSocket(`${scheme}//${location.host}/`);
+        const endpoint = new URL("/", location.href);
+        endpoint.protocol = scheme;
+        if (idFilter.value) endpoint.searchParams.set("id", idFilter.value);
+        if (eventFilter.value) endpoint.searchParams.set("event", eventFilter.value);
+        const socket = new WebSocket(endpoint.toString());
+        eventSocket = socket;
         socket.onopen = () => { connection.textContent = "状態APIとWebSocketに接続中"; };
         socket.onmessage = (message) => {
           let event;
@@ -115,13 +150,25 @@
           refreshStatus();
         };
         socket.onclose = () => {
+          if (eventSocket !== socket) return;
           connection.textContent = "WebSocketを再接続しています…";
-          setTimeout(connectEvents, 3000);
+          reconnectTimer = setTimeout(connectEvents, 3000);
         };
         socket.onerror = () => socket.close();
       }
 
+      function restartEvents() {
+        clearTimeout(reconnectTimer);
+        events.replaceChildren();
+        if (eventSocket) {
+          eventSocket.onclose = null;
+          eventSocket.close();
+        }
+        connectEvents();
+      }
+
       document.querySelector("#refresh").addEventListener("click", refreshStatus);
+      document.querySelector("#apply-filter").addEventListener("click", restartEvents);
       refreshStatus();
       setInterval(refreshStatus, 15000);
       connectEvents();

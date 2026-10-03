@@ -86,6 +86,14 @@ URLとCSSセレクターは設定読込時に形式を検査します。Simple�
 
 プロセス起動時に`0.0.0.0:3000`でWebSocketサーバーを開始します。`ws://localhost:3000/`に接続すると、変更・失敗・復旧をJSONメッセージで受け取れます。内容が変わった場合は次の形式です。
 
+接続URLに`id`と`event`を指定すると、対象とイベントを絞れます。各条件は省略可能で、省略した条件は全てを対象にします。
+
+```text
+ws://localhost:3000/?id=ProjectReadme&event=changed
+```
+
+`event`には`changed`、`poll_failed`、`poll_recovered`を指定できます。不明な値はHTTP 400で拒否されます。簡易WebUIの「最近の通知」にも同じ絞り込みを追加しました。状態一覧にはフィルターを適用せず、通知ストリームだけを絞ります。
+
 ```json
 {"event":"changed","id":"ProjectReadme","url":"https://example.com/project","timestamp":"2026-10-03 12:34:56"}
 ```
