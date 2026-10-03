@@ -29,10 +29,18 @@ impl TomlDataRepository {
             .unwrap_or_else(|| Data {
                 hash: None,
                 last_updated: None,
-                last_checked: now,
+                last_checked: None,
+                last_attempted: None,
+                last_success: None,
+                consecutive_failures: 0,
+                last_error: None,
             });
 
-        data.last_checked = now;
+        data.last_checked = Some(now);
+        data.last_attempted = Some(now);
+        data.last_success = Some(now);
+        data.consecutive_failures = 0;
+        data.last_error = None;
 
         if data.hash.as_ref() != Some(&hash) {
             data.last_updated = now.into();
@@ -116,6 +124,82 @@ impl DataRepository for TomlDataRepository {
         }
     }
 
+    async fn record_success(&mut self, id: Id) -> Result<(), Self::Error> {
+        let now = Timestamp::now();
+        let previous_data = self.proxy.get_cache().unwrap().get(&id).cloned();
+        let data = self
+            .proxy
+            .get_cache_mut()
+            .unwrap()
+            .entry(id.clone())
+            .or_insert_with(|| Data {
+                hash: None,
+                last_updated: None,
+                last_checked: None,
+                last_attempted: None,
+                last_success: None,
+                consecutive_failures: 0,
+                last_error: None,
+            });
+
+        data.last_attempted = Some(now);
+        data.last_success = Some(now);
+        data.consecutive_failures = 0;
+        data.last_error = None;
+
+        if let Err(error) = self.proxy.save().await {
+            match previous_data {
+                Some(data) => {
+                    let _ = self.proxy.get_cache_mut().unwrap().insert(id, data);
+                }
+                None => {
+                    let _ = self.proxy.get_cache_mut().unwrap().remove(&id);
+                }
+            }
+            return Err(error.into());
+        }
+
+        Ok(())
+    }
+
+    async fn record_failure(&mut self, id: Id, error: String) -> Result<u32, Self::Error> {
+        let now = Timestamp::now();
+        let previous_data = self.proxy.get_cache().unwrap().get(&id).cloned();
+        let data = self
+            .proxy
+            .get_cache_mut()
+            .unwrap()
+            .entry(id.clone())
+            .or_insert_with(|| Data {
+                hash: None,
+                last_updated: None,
+                last_checked: None,
+                last_attempted: None,
+                last_success: None,
+                consecutive_failures: 0,
+                last_error: None,
+            });
+
+        data.last_attempted = Some(now);
+        data.consecutive_failures = data.consecutive_failures.saturating_add(1);
+        data.last_error = Some(error);
+        let consecutive_failures = data.consecutive_failures;
+
+        if let Err(error) = self.proxy.save().await {
+            match previous_data {
+                Some(data) => {
+                    let _ = self.proxy.get_cache_mut().unwrap().insert(id, data);
+                }
+                None => {
+                    let _ = self.proxy.get_cache_mut().unwrap().remove(&id);
+                }
+            }
+            return Err(error.into());
+        }
+
+        Ok(consecutive_failures)
+    }
+
     async fn update_multiple(&mut self, map: HashMap<Id, Hash>) -> Result<(), Self::Error> {
         let now = Timestamp::now();
 
@@ -167,6 +251,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn loads_data_files_without_poll_status_fields() {
+        let path = temp_data_path();
+        let path_string = path.to_str().unwrap();
+        let legacy_hash = "00".repeat(32);
+        std::fs::write(
+            &path,
+            format!(
+                "[LegacyPage]\nhash = \"{legacy_hash}\"\nlast_updated = \"2026-10-02T12:00:00Z\"\nlast_checked = \"2026-10-02T12:00:00Z\"\n"
+            ),
+        )
+        .unwrap();
+
+        let mut repository = TomlDataRepository::new(path_string).await.unwrap();
+        let data = repository
+            .get(Id::try_from("LegacyPage".to_owned()).unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(data.hash, Some(Hash::from_hash_str(&legacy_hash).unwrap()));
+        assert_eq!(data.last_attempted, None);
+        assert_eq!(data.last_success, None);
+        assert_eq!(data.consecutive_failures, 0);
+        assert_eq!(data.last_error, None);
+
+        drop(repository);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
     async fn update_reports_changes_and_persists_data() {
         let path = temp_data_path();
         let path_string = path.to_str().unwrap();
@@ -196,7 +310,32 @@ mod tests {
         let data = reloaded.get(id.clone()).await.unwrap().unwrap();
         assert_eq!(data.hash, Some(second_hash));
         assert_eq!(data.last_updated, Some(second_updated));
-        assert!(data.last_checked >= second_updated);
+        assert!(data.last_checked.unwrap() >= second_updated);
+        assert_eq!(data.last_success, Some(second_updated));
+        assert_eq!(data.consecutive_failures, 0);
+
+        let failure_count = reloaded
+            .record_failure(id.clone(), "temporary error".to_owned())
+            .await
+            .unwrap();
+        assert_eq!(failure_count, 1);
+        let failed_data = reloaded.get(id.clone()).await.unwrap().unwrap();
+        assert_eq!(failed_data.last_error.as_deref(), Some("temporary error"));
+        assert_eq!(failed_data.consecutive_failures, 1);
+
+        let second_failure_count = reloaded
+            .record_failure(id.clone(), "still failing".to_owned())
+            .await
+            .unwrap();
+        assert_eq!(second_failure_count, 2);
+        let recovered_at = reloaded
+            .update(id.clone(), Hash::new("second version"))
+            .await
+            .unwrap();
+        assert_eq!(recovered_at, None);
+        let recovered_data = reloaded.get(id.clone()).await.unwrap().unwrap();
+        assert_eq!(recovered_data.consecutive_failures, 0);
+        assert_eq!(recovered_data.last_error, None);
 
         let deleted = reloaded.delete(id.clone()).await.unwrap().unwrap();
         assert_eq!(deleted.hash, Some(Hash::new("second version")));

@@ -24,7 +24,16 @@ pub struct Config {
 pub struct Data {
     pub hash: Option<Hash>,
     pub last_updated: Option<Timestamp>,
-    pub last_checked: Timestamp,
+    #[serde(default)]
+    pub last_checked: Option<Timestamp>,
+    #[serde(default)]
+    pub last_attempted: Option<Timestamp>,
+    #[serde(default)]
+    pub last_success: Option<Timestamp>,
+    #[serde(default)]
+    pub consecutive_failures: u32,
+    #[serde(default)]
+    pub last_error: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]

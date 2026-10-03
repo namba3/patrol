@@ -19,6 +19,7 @@
 - `Poller::poll_multiple`は`(Id, Result<String, Error>)`のstreamを返します。完了順は入力順とは限りません。
 - `Config`の`mode`は`Simple`か`Full`です。TOMLでは小文字表記を使い、省略時の既定値は`Full`です。
 - `DataRepository::update`は内容が変わった場合に更新時刻を返し、同じ内容なら`None`を返します。
+- `DataRepository::record_failure`は対象の連続失敗数と直近エラーを保存します。成功時の`update`または`record_success`で失敗状態を消去します。
 - `App`は空の取得内容を保存しません。抽出結果の正規化を変える場合は、既存の記録との比較結果にも影響することを考慮します。
 - TOMLリポジトリは起動時にファイルを読み込み、メモリ上のキャッシュを更新して保存します。稼働中に外部編集したファイルは自動再読込されません。
 

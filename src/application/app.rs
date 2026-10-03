@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use futures_util::StreamExt;
 use log::{debug, info, warn};
 use prettytable::{color, row, Attr, Cell, Row, Table};
@@ -13,10 +15,24 @@ pub struct App<ConfigRepository, DataRepository, Poller> {
     limit: Option<u8>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DocUpdateEvent {
+    Changed,
+    PollFailed,
+    PollRecovered,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct DocUpdateInfo {
+    pub event: DocUpdateEvent,
     pub id: String,
     pub url: String,
     pub timestamp: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consecutive_failures: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 impl<ConfigRepository, DataRepository, Poller> App<ConfigRepository, DataRepository, Poller>
@@ -58,6 +74,16 @@ where
         } = self;
 
         let mut interval = tokio::time::interval(period);
+        let mut failed_ids = match data_repo.get_all().await {
+            Ok(data) => data
+                .into_iter()
+                .filter_map(|(id, data)| (data.consecutive_failures > 0).then_some(id))
+                .collect::<HashSet<_>>(),
+            Err(error) => {
+                warn!("{error}");
+                HashSet::new()
+            }
+        };
 
         loop {
             match &mut limit {
@@ -76,6 +102,7 @@ where
                 .map_err(Error::ConfigRepositoryError)?;
 
             let mut rem = configs.clone();
+            let mut latest_errors = HashMap::new();
             let mut retry = 3;
 
             while 0 < rem.len() && 0 < retry {
@@ -89,6 +116,7 @@ where
                         Ok(x) => x,
                         Err(why) => {
                             warn!("[{id}]: {why}");
+                            latest_errors.insert(id.clone(), why.to_string());
                             continue;
                         }
                     };
@@ -97,6 +125,24 @@ where
 
                     if content.trim().len() <= 0 {
                         warn!("[{id}]: ignore empty content.");
+                        let had_failure = failed_ids.contains(&id);
+                        match data_repo.record_success(id.clone()).await {
+                            Ok(()) => {
+                                if had_failure {
+                                    failed_ids.remove(&id);
+                                    let _ = tx_doc_update.send(DocUpdateInfo {
+                                        event: DocUpdateEvent::PollRecovered,
+                                        id: id.to_string(),
+                                        url: configs[&id].url.as_str().to_owned(),
+                                        timestamp: Timestamp::now().to_string(),
+                                        consecutive_failures: None,
+                                        error: None,
+                                    });
+                                }
+                            }
+                            Err(error) => warn!("[{id}]: {error}"),
+                        }
+                        let _ = rem.remove(&id);
                         continue;
                     }
 
@@ -104,24 +150,61 @@ where
 
                     let hash = domain::Hash::new(content.as_bytes());
 
-                    match data_repo.update(id.clone(), hash).await {
+                    let update_succeeded = match data_repo.update(id.clone(), hash).await {
                         Ok(Some(timestamp)) => {
                             let _ = tx_doc_update.send(DocUpdateInfo {
+                                event: DocUpdateEvent::Changed,
                                 id: id.to_string(),
                                 url: configs[&id].url.as_str().to_owned(),
                                 timestamp: timestamp.to_string(),
+                                consecutive_failures: None,
+                                error: None,
                             });
+                            true
                         }
-                        Ok(None) => (),
+                        Ok(None) => true,
                         Err(why) => {
-                            warn!("[{id}]: {why}")
+                            warn!("[{id}]: {why}");
+                            false
                         }
+                    };
+
+                    if update_succeeded && failed_ids.remove(&id) {
+                        let _ = tx_doc_update.send(DocUpdateInfo {
+                            event: DocUpdateEvent::PollRecovered,
+                            id: id.to_string(),
+                            url: configs[&id].url.as_str().to_owned(),
+                            timestamp: Timestamp::now().to_string(),
+                            consecutive_failures: None,
+                            error: None,
+                        });
                     }
 
                     let _ = rem.remove(&id);
                 }
 
                 retry -= 1;
+            }
+
+            for (id, _config) in rem.iter() {
+                let error = latest_errors
+                    .remove(id)
+                    .unwrap_or_else(|| "poll did not complete before the cycle deadline".into());
+                match data_repo.record_failure(id.clone(), error.clone()).await {
+                    Ok(consecutive_failures) => {
+                        if failed_ids.insert(id.clone()) {
+                            let _ = tx_doc_update.send(DocUpdateInfo {
+                                event: DocUpdateEvent::PollFailed,
+                                id: id.to_string(),
+                                url: configs[id].url.as_str().to_owned(),
+                                timestamp: Timestamp::now().to_string(),
+                                consecutive_failures: Some(consecutive_failures),
+                                error: Some(error),
+                            });
+                        }
+                    }
+                    Err(why) => warn!("[{id}]: failed to store poll failure: {why}"),
+                }
             }
 
             let data_map = data_repo.get_all().await;
@@ -132,32 +215,44 @@ where
                     continue;
                 }
             };
-            let mut data_list: Vec<_> = data_map.into_iter().collect();
-            data_list.sort_by_key(|x| x.1.last_updated.clone());
+            let mut data_list: Vec<_> = configs
+                .keys()
+                .map(|id| (id.clone(), data_map.get(id)))
+                .collect();
+            data_list.sort_by_key(|(_, data)| data.and_then(|data| data.last_updated));
 
             let now = Timestamp::now();
             let yesterday_now = now - Duration::from_days(1);
             let one_hour_ago = now - Duration::from_hours(1);
 
-            let data_list: Vec<_> = data_list
-                .iter()
-                .filter_map(|x| x.1.last_updated.map(|l| (x.0.clone(), l)))
-                .collect();
-
             let mut table = Table::new();
 
-            table.add_row(row!["name", "last_updated", "url",]);
-            for (id, time) in data_list {
-                let url = &configs[&id].url;
-                let color = match time {
-                    t if one_hour_ago < t => color::BRIGHT_GREEN,
-                    t if yesterday_now < t => color::BRIGHT_YELLOW,
+            table.add_row(row!["name", "status", "last_updated", "url",]);
+            for (id, data) in data_list {
+                let config = &configs[&id];
+                let status = match data {
+                    Some(data) if data.consecutive_failures > 0 => {
+                        format!("failed ({})", data.consecutive_failures)
+                    }
+                    Some(data) if data.last_success.is_some() => "ok".to_owned(),
+                    _ => "not checked".to_owned(),
+                };
+                let last_updated = data.and_then(|data| data.last_updated);
+                let color = match last_updated {
+                    Some(t) if one_hour_ago < t => color::BRIGHT_GREEN,
+                    Some(t) if yesterday_now < t => color::BRIGHT_YELLOW,
                     _ => color::BRIGHT_BLACK,
                 };
                 table.add_row(Row::new(vec![
                     Cell::new(id.as_str()).with_style(Attr::ForegroundColor(color)),
-                    Cell::new(&time.to_string()).with_style(Attr::ForegroundColor(color)),
-                    Cell::new(url.as_str()).with_style(Attr::ForegroundColor(color)),
+                    Cell::new(&status),
+                    Cell::new(
+                        &last_updated
+                            .map(|time| time.to_string())
+                            .unwrap_or_else(|| "-".to_owned()),
+                    )
+                    .with_style(Attr::ForegroundColor(color)),
+                    Cell::new(config.url.as_str()).with_style(Attr::ForegroundColor(color)),
                 ]));
             }
 
@@ -275,6 +370,14 @@ mod tests {
         }
 
         async fn update(&mut self, _id: Id, _hash: Hash) -> Result<Option<Timestamp>, Self::Error> {
+            Err(TestPollerError)
+        }
+
+        async fn record_success(&mut self, _id: Id) -> Result<(), Self::Error> {
+            Err(TestPollerError)
+        }
+
+        async fn record_failure(&mut self, _id: Id, _error: String) -> Result<u32, Self::Error> {
             Err(TestPollerError)
         }
 
@@ -434,6 +537,7 @@ mode = "simple"
         app.run(tx).await.unwrap();
 
         let update = rx.try_recv().unwrap();
+        assert_eq!(update.event, super::DocUpdateEvent::Changed);
         assert_eq!(update.id, "ChangedPage");
         assert_eq!(update.url, "https://example.com/changed");
         assert!(rx.try_recv().is_err());
@@ -442,7 +546,10 @@ mode = "simple"
         let changed = data_repo.get(changed_id).await.unwrap().unwrap();
         assert_eq!(changed.hash, Some(Hash::new("updated text")));
         assert!(changed.last_updated.is_some());
-        assert!(data_repo.get(empty_id).await.unwrap().is_none());
+        let empty = data_repo.get(empty_id).await.unwrap().unwrap();
+        assert_eq!(empty.hash, None);
+        assert_eq!(empty.last_checked, None);
+        assert!(empty.last_success.is_some());
 
         drop(data_repo);
         std::fs::remove_file(config_path).unwrap();
@@ -500,7 +607,7 @@ mode = "simple"
     }
 
     #[tokio::test]
-    async fn run_does_not_persist_or_notify_failed_polls() {
+    async fn run_persists_failures_and_notifies_recovery() {
         let config_path = temp_file("failed-config");
         let data_path = temp_file("failed-data");
         std::fs::write(
@@ -522,9 +629,45 @@ mode = "simple"
 
         app.run(tx).await.unwrap();
 
+        let failure = rx.try_recv().unwrap();
+        assert_eq!(failure.event, super::DocUpdateEvent::PollFailed);
+        assert_eq!(failure.id, "FailedPage");
+        assert_eq!(failure.consecutive_failures, Some(1));
+        assert_eq!(failure.error.as_deref(), Some("test poller error"));
         assert!(rx.try_recv().is_err());
         let mut data_repo = TomlDataRepository::new(data_path_string).await.unwrap();
-        assert!(data_repo.get(id).await.unwrap().is_none());
+        let failure_state = data_repo.get(id.clone()).await.unwrap().unwrap();
+        assert_eq!(failure_state.hash, None);
+        assert_eq!(failure_state.consecutive_failures, 1);
+        assert_eq!(
+            failure_state.last_error.as_deref(),
+            Some("test poller error")
+        );
+        drop(data_repo);
+
+        let config_repo = TomlConfigRepository::new(config_path_string).await.unwrap();
+        let data_repo = TomlDataRepository::new(data_path_string).await.unwrap();
+        let poller = StaticPoller {
+            contents: HashMap::from([(id.clone(), Ok("recovered content".to_owned()))]),
+        };
+        let app = App::new(config_repo, data_repo, poller, 60, Some(1));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        app.run(tx).await.unwrap();
+
+        let events = [rx.try_recv().unwrap(), rx.try_recv().unwrap()];
+        assert!(events
+            .iter()
+            .any(|event| event.event == super::DocUpdateEvent::Changed));
+        assert!(events
+            .iter()
+            .any(|event| event.event == super::DocUpdateEvent::PollRecovered));
+        assert!(rx.try_recv().is_err());
+
+        let mut data_repo = TomlDataRepository::new(data_path_string).await.unwrap();
+        let recovered_state = data_repo.get(id).await.unwrap().unwrap();
+        assert_eq!(recovered_state.consecutive_failures, 0);
+        assert_eq!(recovered_state.last_error, None);
 
         drop(data_repo);
         std::fs::remove_file(config_path).unwrap();

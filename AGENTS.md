@@ -5,7 +5,8 @@
 - This is a Rust 2021 project that currently requires the nightly toolchain because `src/lib.rs` enables nightly features.
 - Keep the onion-architecture boundary: domain types and traits belong in `src/domain/`, use cases in `src/application/`, concrete I/O adapters in `src/infrastructure/`, and process wiring/CLI in `src/main.rs`.
 - Application code should depend on domain traits rather than TOML, HTTP, or Playwright implementations.
-- `DataRepository::update` returns a timestamp only when the content hash changes. `App` ignores empty extracted content.
+- `DataRepository::update` returns a timestamp only when the content hash changes. Empty extracted content does not change the saved content hash, but it records a successful poll status.
+- Poll failures are recorded after the in-cycle retries. Successful polls clear the consecutive failure count and last error.
 - `DataRepositoryActor` exists but is not part of the current startup path in `src/main.rs`.
 
 ## Documentation

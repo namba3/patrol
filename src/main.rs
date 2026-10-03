@@ -103,9 +103,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let message_dealer = tokio::spawn(async move {
         while let Some(x) = rx_doc_update.recv().await {
             let msg = Message {
+                event: x.event,
                 id: x.id,
                 url: x.url,
                 timestamp: x.timestamp,
+                consecutive_failures: x.consecutive_failures,
+                error: x.error,
             };
             let msg = serde_json::to_string(&msg).unwrap();
 
@@ -178,7 +181,37 @@ async fn websocket(stream: WebSocket, state: Arc<AppState>) {
 
 #[derive(Serialize)]
 struct Message {
+    pub event: patrol::application::app::DocUpdateEvent,
     pub id: String,
     pub url: String,
     pub timestamp: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consecutive_failures: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Message;
+    use patrol::application::app::DocUpdateEvent;
+
+    #[test]
+    fn websocket_failure_message_includes_event_and_failure_details() {
+        let message = Message {
+            event: DocUpdateEvent::PollFailed,
+            id: "Page".to_owned(),
+            url: "https://example.com/page".to_owned(),
+            timestamp: "2026-10-03 12:00:00".to_owned(),
+            consecutive_failures: Some(2),
+            error: Some("request failed".to_owned()),
+        };
+
+        let json = serde_json::to_value(message).unwrap();
+
+        assert_eq!(json["event"], "poll_failed");
+        assert_eq!(json["id"], "Page");
+        assert_eq!(json["consecutive_failures"], 2);
+        assert_eq!(json["error"], "request failed");
+    }
 }
