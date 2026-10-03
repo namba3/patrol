@@ -235,4 +235,45 @@ wait_seconds = 3
         assert!(result.is_err());
         std::fs::remove_file(path).unwrap();
     }
+
+    #[tokio::test]
+    async fn update_and_delete_persist_config_changes() {
+        let path = temp_config_path();
+        std::fs::write(
+            &path,
+            "[Page]\nurl = \"https://example.com/old\"\nselector = \"main\"\nmode = \"full\"\n",
+        )
+        .unwrap();
+
+        let path_string = path.to_str().unwrap();
+        let id = Id::try_from("Page".to_owned()).unwrap();
+        let mut repository = TomlConfigRepository::new(path_string).await.unwrap();
+        let replacement = crate::domain::Config {
+            url: crate::domain::Url::new("https://example.com/new".to_owned()).unwrap(),
+            selector: crate::domain::Selector::new(".content".to_owned()).unwrap(),
+            mode: Mode::Simple,
+            wait_seconds: Some(5),
+        };
+
+        repository
+            .update(id.clone(), replacement.clone())
+            .await
+            .unwrap();
+        let updated = repository.get_all().await.unwrap();
+        assert_eq!(updated[&id].url.as_str(), "https://example.com/new");
+        assert_eq!(updated[&id].selector.as_str(), ".content");
+        assert_eq!(updated[&id].mode, Mode::Simple);
+        assert_eq!(updated[&id].wait_seconds, Some(5));
+
+        let deleted = repository.delete(id.clone()).await.unwrap().unwrap();
+        assert_eq!(deleted.url, replacement.url);
+        assert!(repository.delete(id).await.unwrap().is_none());
+        drop(repository);
+
+        let mut reloaded = TomlConfigRepository::new(path_string).await.unwrap();
+        assert!(reloaded.get_all().await.unwrap().is_empty());
+
+        drop(reloaded);
+        std::fs::remove_file(path).unwrap();
+    }
 }

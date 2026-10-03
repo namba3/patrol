@@ -193,12 +193,19 @@ mod tests {
         drop(repository);
 
         let mut reloaded = TomlDataRepository::new(path_string).await.unwrap();
-        let data = reloaded.get(id).await.unwrap().unwrap();
+        let data = reloaded.get(id.clone()).await.unwrap().unwrap();
         assert_eq!(data.hash, Some(second_hash));
         assert_eq!(data.last_updated, Some(second_updated));
         assert!(data.last_checked >= second_updated);
 
+        let deleted = reloaded.delete(id.clone()).await.unwrap().unwrap();
+        assert_eq!(deleted.hash, Some(Hash::new("second version")));
+        assert!(reloaded.delete(id.clone()).await.unwrap().is_none());
+
         drop(reloaded);
+        let mut after_delete = TomlDataRepository::new(path_string).await.unwrap();
+        assert!(after_delete.get(id).await.unwrap().is_none());
+        drop(after_delete);
         std::fs::remove_file(path).unwrap();
     }
 }
