@@ -88,13 +88,18 @@ impl From<reqwest::Error> for Error {
 fn extract_text(html: &str, selector: &scraper::Selector) -> String {
     let doc = Html::parse_document(html);
 
-    let content = doc
-        .select(&selector)
-        .flat_map(|x| x.text())
-        .map(|x| x.trim_start().trim_end())
-        .filter(|x| 0 < x.len())
-        .collect::<Vec<_>>()
-        .join("\n");
+    let mut content = String::new();
+    for text in doc.select(selector).flat_map(|element| element.text()) {
+        let text = text.trim();
+        if text.is_empty() {
+            continue;
+        }
+
+        if !content.is_empty() {
+            content.push('\n');
+        }
+        content.push_str(text);
+    }
 
     content
 }

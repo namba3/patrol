@@ -22,6 +22,9 @@ use futures::stream::StreamExt;
 use std::sync::Arc;
 use tokio::io::AsyncBufReadExt;
 use tokio::sync::{broadcast, oneshot};
+
+const DOC_UPDATE_CHANNEL_CAPACITY: usize = 128;
+
 #[derive(Parser)]
 #[clap(author, version, about)]
 struct Args {
@@ -75,7 +78,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("simple_worker_num: {}", args.simple_worker_num);
 
     let (tx_doc_update, mut rx_doc_update) =
-        tokio::sync::mpsc::unbounded_channel::<DocUpdateInfo>();
+        tokio::sync::mpsc::channel::<DocUpdateInfo>(DOC_UPDATE_CHANNEL_CAPACITY);
     let (tx, rx) = broadcast::channel(100);
     let web_app_state = Arc::new(AppState { rx });
     let web_app = Router::new()
@@ -169,9 +172,22 @@ async fn websocket(stream: WebSocket, state: Arc<AppState>) {
 
     let mut rx = state.rx.resubscribe();
 
-    while let Ok(msg) = rx.recv().await {
+    while let Some(msg) = next_broadcast_message(&mut rx).await {
         if let Err(why) = sender.send(msg.into()).await {
-            log::warn!("{why}")
+            log::warn!("failed to send a WebSocket message: {why}");
+            break;
+        }
+    }
+}
+
+async fn next_broadcast_message(rx: &mut broadcast::Receiver<String>) -> Option<String> {
+    loop {
+        match rx.recv().await {
+            Ok(message) => return Some(message),
+            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                log::warn!("WebSocket client lagged; skipped {skipped} buffered events");
+            }
+            Err(broadcast::error::RecvError::Closed) => return None,
         }
     }
 }
@@ -179,6 +195,8 @@ async fn websocket(stream: WebSocket, state: Arc<AppState>) {
 #[cfg(test)]
 mod tests {
     use patrol::application::app::{DocUpdateEvent, DocUpdateInfo};
+
+    use super::next_broadcast_message;
 
     #[test]
     fn websocket_failure_message_includes_event_and_failure_details() {
@@ -197,5 +215,20 @@ mod tests {
         assert_eq!(json["id"], "Page");
         assert_eq!(json["consecutive_failures"], 2);
         assert_eq!(json["error"], "request failed");
+    }
+
+    #[tokio::test]
+    async fn websocket_receiver_continues_after_lag_and_stops_when_closed() {
+        let (tx, mut rx) = tokio::sync::broadcast::channel(1);
+        tx.send("older event".to_owned()).unwrap();
+        tx.send("latest event".to_owned()).unwrap();
+
+        assert_eq!(
+            next_broadcast_message(&mut rx).await.as_deref(),
+            Some("latest event")
+        );
+
+        drop(tx);
+        assert_eq!(next_broadcast_message(&mut rx).await, None);
     }
 }

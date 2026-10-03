@@ -1,12 +1,9 @@
-use std::{fmt::Display, io::SeekFrom};
+use std::{fmt::Display, path::PathBuf};
 
-use tokio::{
-    fs::{File, OpenOptions},
-    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
-};
+use tokio::{fs::OpenOptions, io::AsyncWriteExt};
 
 pub struct TomlFileProxy<T> {
-    file: File,
+    path: PathBuf,
     cache: Option<T>,
 }
 
@@ -16,22 +13,21 @@ where
 {
     /// Create a new proxy to the toml file.
     pub async fn new(path: &str) -> Result<Self, Error> {
-        let file = OpenOptions::new()
+        let path = PathBuf::from(path);
+        OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
-            .open(path)
+            .open(&path)
             .await?;
+        let path = tokio::fs::canonicalize(path).await?;
 
-        Ok(Self { file, cache: None })
+        Ok(Self { path, cache: None })
     }
 
     /// Load data from the file to cache, and returns the cached data
     pub async fn load(&mut self) -> Result<&T, Error> {
-        let mut toml = String::new();
-
-        self.file.seek(SeekFrom::Start(0)).await?;
-        self.file.read_to_string(&mut toml).await?;
+        let toml = tokio::fs::read_to_string(&self.path).await?;
 
         self.cache = toml::from_str::<T>(&toml)?.into();
 
@@ -40,19 +36,37 @@ where
 
     /// Save the cached data to the file
     pub async fn save(&mut self) -> Result<(), Error> {
-        let Self { file, cache } = self;
-        let cache = match cache {
+        let cache = match &self.cache {
             Some(c) => c,
             None => return Err(Error::CacheEmpty),
         };
 
         let toml = toml::to_string_pretty(cache)?;
+        let permissions = tokio::fs::metadata(&self.path).await?.permissions();
+        let temporary_path = self.path.with_file_name(format!(
+            ".{}.{}.tmp",
+            self.path.file_name().unwrap_or_default().to_string_lossy(),
+            uuid::Uuid::new_v4()
+        ));
 
-        file.seek(SeekFrom::Start(0)).await?;
-        file.set_len(0).await?;
-        file.write_all(toml.as_bytes()).await?;
+        let write_result = async {
+            let mut temporary_file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary_path)
+                .await?;
+            tokio::fs::set_permissions(&temporary_path, permissions).await?;
+            temporary_file.write_all(toml.as_bytes()).await?;
+            temporary_file.sync_all().await?;
+            drop(temporary_file);
+            tokio::fs::rename(&temporary_path, &self.path).await
+        }
+        .await;
 
-        file.flush().await?;
+        if let Err(error) = write_result {
+            let _ = tokio::fs::remove_file(&temporary_path).await;
+            return Err(error.into());
+        }
 
         Ok(())
     }
@@ -159,6 +173,8 @@ mod tests {
     #[tokio::test]
     async fn serialization_failure_is_returned_as_an_error() {
         let path = temp_toml_path();
+        let previous_content = "previous = \"data\"\n";
+        std::fs::write(&path, previous_content).unwrap();
         let mut proxy = TomlFileProxy::<FailsToSerialize>::new(path.to_str().unwrap())
             .await
             .unwrap();
@@ -167,6 +183,7 @@ mod tests {
         let result = proxy.save().await;
 
         assert!(matches!(result, Err(Error::TomlSerializeError(_))));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), previous_content);
         drop(proxy);
         std::fs::remove_file(path).unwrap();
     }
@@ -178,6 +195,13 @@ mod tests {
         let mut proxy = TomlFileProxy::<HashMap<String, String>>::new(path_string)
             .await
             .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+            permissions.set_mode(0o640);
+            std::fs::set_permissions(&path, permissions).unwrap();
+        }
         let mut expected = HashMap::from([
             ("page".to_owned(), "a long value to be replaced".to_owned()),
             ("other".to_owned(), "kept".to_owned()),
@@ -190,6 +214,12 @@ mod tests {
             .insert("page".to_owned(), "short".to_owned());
         expected.insert("page".to_owned(), "short".to_owned());
         proxy.save().await.unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o640);
+        }
         drop(proxy);
 
         let mut reloaded = TomlFileProxy::<HashMap<String, String>>::new(path_string)

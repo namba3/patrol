@@ -63,7 +63,7 @@ where
 
     pub async fn run(
         self,
-        tx_doc_update: mpsc::UnboundedSender<DocUpdateInfo>,
+        tx_doc_update: mpsc::Sender<DocUpdateInfo>,
     ) -> Result<(), Error<ConfigRepository::Error, DataRepository::Error, Poller::Error>> {
         let Self {
             mut data_repo,
@@ -108,6 +108,8 @@ where
 
             let mut rem = configs.clone();
             let mut latest_errors = HashMap::new();
+            let mut successful_hashes = HashMap::new();
+            let mut empty_successes = HashSet::new();
             let mut retry = 3;
 
             while 0 < rem.len() && 0 < retry {
@@ -126,27 +128,11 @@ where
                         }
                     };
 
-                    let content = content.trim_start().trim_end();
+                    let content = content.trim();
 
-                    if content.trim().len() <= 0 {
+                    if content.is_empty() {
                         warn!("[{id}]: ignore empty content.");
-                        let had_failure = failed_ids.contains(&id);
-                        match data_repo.record_success(id.clone()).await {
-                            Ok(()) => {
-                                if had_failure {
-                                    failed_ids.remove(&id);
-                                    let _ = tx_doc_update.send(DocUpdateInfo {
-                                        event: DocUpdateEvent::PollRecovered,
-                                        id: id.to_string(),
-                                        url: configs[&id].url.as_str().to_owned(),
-                                        timestamp: Timestamp::now().to_string(),
-                                        consecutive_failures: None,
-                                        error: None,
-                                    });
-                                }
-                            }
-                            Err(error) => warn!("[{id}]: {error}"),
-                        }
+                        empty_successes.insert(id.clone());
                         let _ = rem.remove(&id);
                         continue;
                     }
@@ -154,62 +140,87 @@ where
                     debug!("[{id}]:\n{}", content);
 
                     let hash = domain::Hash::new(content.as_bytes());
-
-                    let update_succeeded = match data_repo.update(id.clone(), hash).await {
-                        Ok(Some(timestamp)) => {
-                            let _ = tx_doc_update.send(DocUpdateInfo {
-                                event: DocUpdateEvent::Changed,
-                                id: id.to_string(),
-                                url: configs[&id].url.as_str().to_owned(),
-                                timestamp: timestamp.to_string(),
-                                consecutive_failures: None,
-                                error: None,
-                            });
-                            true
-                        }
-                        Ok(None) => true,
-                        Err(why) => {
-                            warn!("[{id}]: {why}");
-                            false
-                        }
-                    };
-
-                    if update_succeeded && failed_ids.remove(&id) {
-                        let _ = tx_doc_update.send(DocUpdateInfo {
-                            event: DocUpdateEvent::PollRecovered,
-                            id: id.to_string(),
-                            url: configs[&id].url.as_str().to_owned(),
-                            timestamp: Timestamp::now().to_string(),
-                            consecutive_failures: None,
-                            error: None,
-                        });
-                    }
-
+                    successful_hashes.insert(id.clone(), hash);
                     let _ = rem.remove(&id);
                 }
 
                 retry -= 1;
             }
 
-            for (id, _config) in rem.iter() {
-                let error = latest_errors
-                    .remove(id)
-                    .unwrap_or_else(|| "poll did not complete before the cycle deadline".into());
-                match data_repo.record_failure(id.clone(), error.clone()).await {
-                    Ok(consecutive_failures) => {
-                        if failed_ids.insert(id.clone()) {
-                            let _ = tx_doc_update.send(DocUpdateInfo {
-                                event: DocUpdateEvent::PollFailed,
-                                id: id.to_string(),
-                                url: configs[id].url.as_str().to_owned(),
-                                timestamp: Timestamp::now().to_string(),
-                                consecutive_failures: Some(consecutive_failures),
-                                error: Some(error),
-                            });
+            let failures: HashMap<domain::Id, String> = rem
+                .keys()
+                .map(|id| {
+                    let error = latest_errors.remove(id).unwrap_or_else(|| {
+                        "poll did not complete before the cycle deadline".into()
+                    });
+                    (id.clone(), error)
+                })
+                .collect();
+            let empty_success_ids = empty_successes.iter().cloned().collect::<Vec<_>>();
+            match data_repo
+                .record_poll_results(successful_hashes, empty_successes, failures.clone())
+                .await
+            {
+                Ok(batch) => {
+                    for (id, timestamp) in batch.changed_at {
+                        if let Some(timestamp) = timestamp {
+                            let _ = tx_doc_update
+                                .send(DocUpdateInfo {
+                                    event: DocUpdateEvent::Changed,
+                                    id: id.to_string(),
+                                    url: configs[&id].url.as_str().to_owned(),
+                                    timestamp: timestamp.to_string(),
+                                    consecutive_failures: None,
+                                    error: None,
+                                })
+                                .await;
+                        }
+
+                        if failed_ids.remove(&id) {
+                            let _ = tx_doc_update
+                                .send(DocUpdateInfo {
+                                    event: DocUpdateEvent::PollRecovered,
+                                    id: id.to_string(),
+                                    url: configs[&id].url.as_str().to_owned(),
+                                    timestamp: Timestamp::now().to_string(),
+                                    consecutive_failures: None,
+                                    error: None,
+                                })
+                                .await;
                         }
                     }
-                    Err(why) => warn!("[{id}]: failed to store poll failure: {why}"),
+
+                    for id in empty_success_ids {
+                        if failed_ids.remove(&id) {
+                            let _ = tx_doc_update
+                                .send(DocUpdateInfo {
+                                    event: DocUpdateEvent::PollRecovered,
+                                    id: id.to_string(),
+                                    url: configs[&id].url.as_str().to_owned(),
+                                    timestamp: Timestamp::now().to_string(),
+                                    consecutive_failures: None,
+                                    error: None,
+                                })
+                                .await;
+                        }
+                    }
+
+                    for (id, consecutive_failures) in batch.failure_counts {
+                        if failed_ids.insert(id.clone()) {
+                            let _ = tx_doc_update
+                                .send(DocUpdateInfo {
+                                    event: DocUpdateEvent::PollFailed,
+                                    id: id.to_string(),
+                                    url: configs[&id].url.as_str().to_owned(),
+                                    timestamp: Timestamp::now().to_string(),
+                                    consecutive_failures: Some(consecutive_failures),
+                                    error: failures.get(&id).cloned(),
+                                })
+                                .await;
+                        }
+                    }
                 }
+                Err(error) => warn!("failed to save polling results: {error}"),
             }
 
             let configured_ids = configs.keys().cloned().collect();
@@ -416,7 +427,7 @@ mod tests {
         }
 
         async fn update_multiple(&mut self, _map: HashMap<Id, Hash>) -> Result<(), Self::Error> {
-            Ok(())
+            Err(TestPollerError)
         }
 
         async fn delete(&mut self, _id: Id) -> Result<Option<Data>, Self::Error> {
@@ -497,7 +508,7 @@ mod tests {
             Some(1),
         );
         assert_eq!(app.period, std::time::Duration::from_secs(1));
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
 
         let result = app.run(tx).await;
 
@@ -530,7 +541,7 @@ mod tests {
             contents: HashMap::from([(id, Ok("content".to_owned()))]),
         };
         let app = App::new(config_repo, data_repo, poller, 60, Some(1));
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
 
         app.run(tx).await.unwrap();
 
@@ -562,7 +573,7 @@ mod tests {
             60,
             Some(1),
         );
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
 
         app.run(tx).await.unwrap();
 
@@ -600,7 +611,7 @@ mode = "simple"
             ]),
         };
         let app = App::new(config_repo, data_repo, poller, 60, Some(1));
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
 
         app.run(tx).await.unwrap();
 
@@ -657,7 +668,7 @@ mode = "simple"
             contents: HashMap::from([(id.clone(), Ok(" same content ".to_owned()))]),
         };
         let app = App::new(config_repo, data_repo, poller, 60, Some(1));
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
 
         app.run(tx).await.unwrap();
 
@@ -693,7 +704,7 @@ mode = "simple"
             contents: HashMap::from([(id.clone(), Err(TestPollerError))]),
         };
         let app = App::new(config_repo, data_repo, poller, 60, Some(1));
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
 
         app.run(tx).await.unwrap();
 
@@ -719,7 +730,7 @@ mode = "simple"
             contents: HashMap::from([(id.clone(), Ok("recovered content".to_owned()))]),
         };
         let app = App::new(config_repo, data_repo, poller, 60, Some(1));
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
 
         app.run(tx).await.unwrap();
 

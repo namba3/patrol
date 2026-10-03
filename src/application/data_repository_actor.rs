@@ -6,6 +6,8 @@ use std::{
 use crate::domain::{self, Id, Timestamp};
 use tokio::sync::{mpsc, oneshot};
 
+const DATA_REPOSITORY_ACTOR_QUEUE_CAPACITY: usize = 64;
+
 pub struct DataRepositoryActor<DataRepository> {
     inner: DataRepository,
 }
@@ -17,7 +19,7 @@ where
         Self { inner }
     }
     pub async fn start(mut self) -> DataRepositoryActorClient<DataRepository> {
-        let (tx_message, mut rx_message) = mpsc::unbounded_channel();
+        let (tx_message, mut rx_message) = mpsc::channel(DATA_REPOSITORY_ACTOR_QUEUE_CAPACITY);
         tokio::spawn(async move {
             while let Some(message) = rx_message.recv().await {
                 match message {
@@ -46,7 +48,19 @@ where
                         let _ = tx.send(result);
                     }
                     Message::UpdateMultiple { tx, map } => {
-                        let result = self.inner.update_multiple(map).await;
+                        let result = self.inner.update_multiple_with_timestamps(map).await;
+                        let _ = tx.send(result);
+                    }
+                    Message::RecordPollResults {
+                        tx,
+                        hashes,
+                        empty_successes,
+                        failures,
+                    } => {
+                        let result = self
+                            .inner
+                            .record_poll_results(hashes, empty_successes, failures)
+                            .await;
                         let _ = tx.send(result);
                     }
                     Message::Delete { tx, id } => {
@@ -88,8 +102,14 @@ enum Message<E> {
         id: Id,
     },
     UpdateMultiple {
-        tx: oneshot::Sender<Result<(), E>>,
+        tx: oneshot::Sender<Result<HashMap<Id, Option<Timestamp>>, E>>,
         map: HashMap<Id, domain::Hash>,
+    },
+    RecordPollResults {
+        tx: oneshot::Sender<Result<domain::PollResultBatch, E>>,
+        hashes: HashMap<Id, domain::Hash>,
+        empty_successes: HashSet<Id>,
+        failures: HashMap<Id, String>,
     },
     Delete {
         tx: oneshot::Sender<Result<Option<domain::Data>, E>>,
@@ -98,12 +118,59 @@ enum Message<E> {
 }
 
 pub struct DataRepositoryActorClient<DataRepository: domain::DataRepository> {
-    tx_message: mpsc::UnboundedSender<Message<DataRepository::Error>>,
+    tx_message: mpsc::Sender<Message<DataRepository::Error>>,
 }
 impl<DataRepository: domain::DataRepository> DataRepositoryActorClient<DataRepository> {
     pub fn clone(&self) -> Self {
         let tx_message = self.tx_message.clone();
         Self { tx_message }
+    }
+
+    async fn send_update_multiple(
+        &mut self,
+        map: HashMap<Id, domain::Hash>,
+    ) -> Result<HashMap<Id, Option<Timestamp>>, Error<DataRepository::Error>> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .tx_message
+            .send(Message::UpdateMultiple { tx, map })
+            .await
+            .is_err()
+        {
+            return Err(Error::ActorMessageError(ActorMessageError::SendError));
+        }
+
+        match rx.await {
+            Ok(result) => result.map_err(Error::DataRepositoryError),
+            Err(_) => Err(Error::ActorMessageError(ActorMessageError::RecvError)),
+        }
+    }
+
+    async fn send_poll_results(
+        &mut self,
+        hashes: HashMap<Id, domain::Hash>,
+        empty_successes: HashSet<Id>,
+        failures: HashMap<Id, String>,
+    ) -> Result<domain::PollResultBatch, Error<DataRepository::Error>> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .tx_message
+            .send(Message::RecordPollResults {
+                tx,
+                hashes,
+                empty_successes,
+                failures,
+            })
+            .await
+            .is_err()
+        {
+            return Err(Error::ActorMessageError(ActorMessageError::SendError));
+        }
+
+        match rx.await {
+            Ok(result) => result.map_err(Error::DataRepositoryError),
+            Err(_) => Err(Error::ActorMessageError(ActorMessageError::RecvError)),
+        }
     }
 }
 
@@ -115,7 +182,7 @@ impl<DataRepository: domain::DataRepository> domain::DataRepository
 
     async fn get(&mut self, id: Id) -> Result<Option<domain::Data>, Self::Error> {
         let (tx, rx) = oneshot::channel();
-        if let Err(_e) = self.tx_message.send(Message::Get { tx, id }) {
+        if let Err(_e) = self.tx_message.send(Message::Get { tx, id }).await {
             return Err(Error::ActorMessageError(ActorMessageError::SendError));
         }
 
@@ -130,7 +197,7 @@ impl<DataRepository: domain::DataRepository> domain::DataRepository
         ids: HashSet<Id>,
     ) -> Result<HashMap<Id, domain::Data>, Self::Error> {
         let (tx, rx) = oneshot::channel();
-        if let Err(_e) = self.tx_message.send(Message::GetMultiple { tx, ids }) {
+        if let Err(_e) = self.tx_message.send(Message::GetMultiple { tx, ids }).await {
             return Err(Error::ActorMessageError(ActorMessageError::SendError));
         }
 
@@ -142,7 +209,7 @@ impl<DataRepository: domain::DataRepository> domain::DataRepository
 
     async fn get_all(&mut self) -> Result<HashMap<Id, domain::Data>, Self::Error> {
         let (tx, rx) = oneshot::channel();
-        if let Err(_e) = self.tx_message.send(Message::GetAll { tx }) {
+        if let Err(_e) = self.tx_message.send(Message::GetAll { tx }).await {
             return Err(Error::ActorMessageError(ActorMessageError::SendError));
         }
 
@@ -158,7 +225,7 @@ impl<DataRepository: domain::DataRepository> domain::DataRepository
         hash: domain::Hash,
     ) -> Result<Option<Timestamp>, Self::Error> {
         let (tx, rx) = oneshot::channel();
-        if let Err(_e) = self.tx_message.send(Message::Update { tx, id, hash }) {
+        if let Err(_e) = self.tx_message.send(Message::Update { tx, id, hash }).await {
             return Err(Error::ActorMessageError(ActorMessageError::SendError));
         }
 
@@ -173,6 +240,7 @@ impl<DataRepository: domain::DataRepository> domain::DataRepository
         if let Err(_e) = self
             .tx_message
             .send(Message::RecordFailure { tx, id, error })
+            .await
         {
             return Err(Error::ActorMessageError(ActorMessageError::SendError));
         }
@@ -185,7 +253,11 @@ impl<DataRepository: domain::DataRepository> domain::DataRepository
 
     async fn record_success(&mut self, id: Id) -> Result<(), Self::Error> {
         let (tx, rx) = oneshot::channel();
-        if let Err(_e) = self.tx_message.send(Message::RecordSuccess { tx, id }) {
+        if let Err(_e) = self
+            .tx_message
+            .send(Message::RecordSuccess { tx, id })
+            .await
+        {
             return Err(Error::ActorMessageError(ActorMessageError::SendError));
         }
 
@@ -196,20 +268,29 @@ impl<DataRepository: domain::DataRepository> domain::DataRepository
     }
 
     async fn update_multiple(&mut self, map: HashMap<Id, domain::Hash>) -> Result<(), Self::Error> {
-        let (tx, rx) = oneshot::channel();
-        if let Err(_e) = self.tx_message.send(Message::UpdateMultiple { tx, map }) {
-            return Err(Error::ActorMessageError(ActorMessageError::SendError));
-        }
+        self.send_update_multiple(map).await.map(|_| ())
+    }
 
-        match rx.await {
-            Ok(result) => result.map_err(Error::DataRepositoryError),
-            Err(_e) => Err(Error::ActorMessageError(ActorMessageError::RecvError)),
-        }
+    async fn update_multiple_with_timestamps(
+        &mut self,
+        map: HashMap<Id, domain::Hash>,
+    ) -> Result<HashMap<Id, Option<Timestamp>>, Self::Error> {
+        self.send_update_multiple(map).await
+    }
+
+    async fn record_poll_results(
+        &mut self,
+        hashes: HashMap<Id, domain::Hash>,
+        empty_successes: HashSet<Id>,
+        failures: HashMap<Id, String>,
+    ) -> Result<domain::PollResultBatch, Self::Error> {
+        self.send_poll_results(hashes, empty_successes, failures)
+            .await
     }
 
     async fn delete(&mut self, id: Id) -> Result<Option<domain::Data>, Self::Error> {
         let (tx, rx) = oneshot::channel();
-        if let Err(_e) = self.tx_message.send(Message::Delete { tx, id }) {
+        if let Err(_e) = self.tx_message.send(Message::Delete { tx, id }).await {
             return Err(Error::ActorMessageError(ActorMessageError::SendError));
         }
 
@@ -325,7 +406,7 @@ mod tests {
 
         async fn update_multiple(&mut self, map: HashMap<Id, Hash>) -> Result<(), Self::Error> {
             for (id, hash) in map {
-                self.update(id, hash).await?;
+                let _ = self.update(id, hash).await?;
             }
             Ok(())
         }
@@ -383,7 +464,11 @@ mod tests {
         assert_eq!(first_data.last_error, None);
 
         let updates = HashMap::from([(second_id.clone(), second_hash.clone())]);
-        client.update_multiple(updates).await.unwrap();
+        let updated_at = client
+            .update_multiple_with_timestamps(updates)
+            .await
+            .unwrap();
+        assert!(updated_at[&second_id].is_some());
         assert_eq!(
             client
                 .record_failure(second_id.clone(), "temporary failure".to_owned())
@@ -395,6 +480,21 @@ mod tests {
         let recovered_second = client.get(second_id.clone()).await.unwrap().unwrap();
         assert_eq!(recovered_second.consecutive_failures, 0);
         assert_eq!(recovered_second.last_error, None);
+
+        let third_id = id("third");
+        let fourth_id = id("fourth");
+        let batch = client
+            .record_poll_results(
+                HashMap::from([(third_id.clone(), Hash::new("third content"))]),
+                HashSet::from([fourth_id.clone()]),
+                HashMap::from([(id("fifth"), "poll failed".to_owned())]),
+            )
+            .await
+            .unwrap();
+        assert!(batch.changed_at[&third_id].is_some());
+        assert_eq!(batch.failure_counts[&id("fifth")], 1);
+        assert!(client.get(fourth_id).await.unwrap().is_some());
+
         let selected = client
             .get_multiple(HashSet::from([
                 first_id.clone(),
@@ -405,7 +505,7 @@ mod tests {
             .unwrap();
         assert_eq!(selected.len(), 2);
         assert_eq!(selected[&second_id].hash, Some(second_hash));
-        assert_eq!(client.get_all().await.unwrap().len(), 2);
+        assert_eq!(client.get_all().await.unwrap().len(), 5);
 
         let mut cloned_client = client.clone();
         let deleted = cloned_client
@@ -416,6 +516,6 @@ mod tests {
         assert_eq!(deleted.hash, Some(first_hash));
         assert!(client.get(first_id.clone()).await.unwrap().is_none());
         assert!(client.delete(first_id).await.unwrap().is_none());
-        assert_eq!(client.get_all().await.unwrap().len(), 1);
+        assert_eq!(client.get_all().await.unwrap().len(), 4);
     }
 }

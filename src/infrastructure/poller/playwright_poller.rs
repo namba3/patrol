@@ -53,10 +53,10 @@ impl Poller for PlaywrightPoller {
     }
 
     async fn poll_multiple(&mut self, configs: HashMap<Id, Config>) -> Self::Stream {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let client_pool = self.client_pool.clone();
         let page_count = self.pool_size;
         let concurrency = usize::from(page_count);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(concurrency);
         tokio::spawn(async move {
             stream::iter(configs)
                 .for_each_concurrent(concurrency, |(id, config)| {
@@ -67,7 +67,7 @@ impl Poller for PlaywrightPoller {
                             match get_or_initialize_pool(&client_pool, page_count).await {
                                 Ok(client_pool) => client_pool,
                                 Err(error) => {
-                                    let _ = tx.send((id, Err(error)));
+                                    let _ = tx.send((id, Err(error))).await;
                                     return;
                                 }
                             };
@@ -91,7 +91,7 @@ impl Poller for PlaywrightPoller {
                             Ok(_) => debug!("[{}]: polling succeeded", &id),
                             Err(error) => debug!("[{}]: polling failed: {error}", &id),
                         }
-                        let _ = tx.send((id, result));
+                        let _ = tx.send((id, result)).await;
                     }
                 })
                 .await;

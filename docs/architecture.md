@@ -27,7 +27,7 @@ DomainはTOMLやHTTPクライアントといった保存・通信手段を選び
 
 `App`が巡回周期、設定取得、ポーリング、ハッシュ保存、更新一覧の出力を制御します。`SelectivePoller`は`Mode`に応じてFullまたはSimpleのpollerへ処理を振り分け、複数の取得ストリームをまとめます。
 
-`DataRepositoryActor`はメッセージ経由でリポジトリ操作を直列化する補助実装です。現在の`main.rs`の起動経路では使用されていません。
+`DataRepositoryActor`は容量64のbounded channelを介してリポジトリ操作を直列化する補助実装です。キューが埋まると要求元が送信完了を待ちます。現在の`main.rs`の起動経路では使用されていません。
 
 ### Infrastructure — `src/infrastructure/`
 
@@ -35,7 +35,7 @@ DomainはTOMLやHTTPクライアントといった保存・通信手段を選び
 - `TomlDataRepository`: ハッシュや時刻などの巡回状態をTOMLに保存します。
 - `TomlFileProxy`: TOMLファイルをメモリ上のキャッシュと同期します。
 - `HttpPoller`: HTTPでHTMLを取得し、CSSセレクターによるCPU処理をブロッキング用スレッドプールで実行します。
-- `PlaywrightPoller`: Fullモードの初回巡回時にPlaywrightとChromiumを初期化・準備し、DOM要素のテキストを取得します。Simpleモードだけを使う場合はブラウザーを起動・準備しません。
+- `PlaywrightPoller`: Fullモードの初回巡回時にPlaywrightとChromiumを初期化・準備し、DOM要素のテキストを取得します。ページ数を同時実行数と結果キュー容量の上限に使い、結果の消費が遅い場合は巡回側も待機します。Simpleモードだけを使う場合はブラウザーを起動・準備しません。
 
 ### Composition root — `src/main.rs`
 
@@ -54,7 +54,7 @@ CLI引数を解釈し、TOMLリポジトリと2種類のpollerを生成して`Ap
 ## 現在の境界と制約
 
 - 保存先はローカルのTOMLファイルです。DBや外部通知サービスの実装はありません。
-- WebSocket通知は変更・失敗・復旧のイベント配信です。履歴や初期状態を配信するAPIはありません。
+- WebSocket通知は変更・失敗・復旧のイベント配信です。履歴や初期状態を配信するAPIはありません。受信側がbroadcast容量100件分以上遅れると、その間の古いイベントを飛ばして配信を続けます。
 - `mode`を省略した設定はFullとして扱われます。
 - Simpleモードは静的HTML取得向けで、ブラウザー上でのJavaScript実行はしません。
 - `src/lib.rs`がnightly featureを有効にしているため、nightly Rustが必要です。
