@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use futures_util::Stream;
+use futures_util::{stream, Stream, StreamExt};
 use reqwest::Client;
 use scraper::Html;
 
@@ -9,12 +9,16 @@ use crate::domain::{Config, Id, Poller};
 #[derive(Debug)]
 pub struct HttpPoller {
     client: Client,
+    max_concurrent_requests: usize,
 }
 
 impl HttpPoller {
-    pub fn new() -> Self {
+    pub fn new(max_concurrent_requests: usize) -> Self {
         let client = Client::new();
-        Self { client }
+        Self {
+            client,
+            max_concurrent_requests: max_concurrent_requests.max(1),
+        }
     }
 }
 
@@ -28,23 +32,13 @@ impl Poller for HttpPoller {
     }
 
     async fn poll_multiple(&mut self, configs: HashMap<Id, Config>) -> Self::Stream {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let client = self.client.clone();
+        let requests = stream::iter(configs.into_iter().map(move |(id, config)| {
+            let client = client.clone();
+            async move { (id, poll(&client, config).await) }
+        }));
 
-        for (id, config) in configs.into_iter() {
-            let client = self.client.clone();
-            let tx = tx.clone();
-            tokio::spawn(async move {
-                let result = poll(&client, config).await;
-                let _ = tx.send((id, result));
-            });
-        }
-        drop(tx);
-
-        async_stream::stream! {
-            while let Some(x) = rx.recv().await {
-                yield x
-            }
-        }
+        requests.buffer_unordered(self.max_concurrent_requests)
     }
 }
 
@@ -74,7 +68,30 @@ fn extract_text(html: &str, selector: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::extract_text;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    use axum::{extract::State, routing::get, Router};
+    use futures_util::StreamExt;
+
+    use super::{extract_text, HttpPoller};
+    use crate::domain::{Config, Id, Mode, Poller, Selector, Url};
+
+    #[derive(Clone)]
+    struct RequestTracker {
+        active: Arc<AtomicUsize>,
+        max_active: Arc<AtomicUsize>,
+    }
+
+    async fn delayed_response(State(tracker): State<RequestTracker>) -> &'static str {
+        let active = tracker.active.fetch_add(1, Ordering::SeqCst) + 1;
+        tracker.max_active.fetch_max(active, Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        tracker.active.fetch_sub(1, Ordering::SeqCst);
+        "<p>response</p>"
+    }
 
     #[test]
     fn extracts_trimmed_text_from_each_matching_element() {
@@ -92,5 +109,49 @@ mod tests {
     #[test]
     fn returns_empty_text_when_selector_has_no_matches() {
         assert_eq!(extract_text("<main><p>content</p></main>", ".missing"), "");
+    }
+
+    #[tokio::test]
+    async fn limits_concurrent_http_requests() {
+        let tracker = RequestTracker {
+            active: Arc::new(AtomicUsize::new(0)),
+            max_active: Arc::new(AtomicUsize::new(0)),
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = Router::new()
+            .route("/{_page}", get(delayed_response))
+            .with_state(tracker.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+
+        let configs = (0..4)
+            .map(|index| {
+                (
+                    Id::try_from(format!("Page{index}")).unwrap(),
+                    Config {
+                        url: Url::new(format!("http://{address}/page{index}")).unwrap(),
+                        selector: Selector::new("p".to_owned()).unwrap(),
+                        mode: Mode::Simple,
+                        wait_seconds: None,
+                    },
+                )
+            })
+            .collect();
+        let mut poller = HttpPoller::new(2);
+        let results = poller
+            .poll_multiple(configs)
+            .await
+            .collect::<Vec<_>>()
+            .await;
+
+        assert_eq!(results.len(), 4);
+        assert!(results
+            .iter()
+            .all(|(_, result)| matches!(result.as_deref(), Ok("response"))));
+        assert_eq!(tracker.max_active.load(Ordering::SeqCst), 2);
+
+        server.abort();
     }
 }

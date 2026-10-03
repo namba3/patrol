@@ -24,6 +24,7 @@ cp config.example.toml config.toml
 | `-c`, `--config-path` | `./config.toml` | 巡回設定ファイル |
 | `-d`, `--data-path` | `./data.toml` | 巡回状態の保存ファイル |
 | `-p`, `--worker-num` | `10` | Fullモードで使うPlaywrightページ数 |
+| `--simple-worker-num` | `10` | Simpleモードで同時に実行するHTTPリクエスト数 |
 | `-i`, `--interval-minutes` | `1` | 巡回間隔（分）。0を指定しても1分として扱う |
 | `--once` | 無効 | 起動後に1回だけ巡回して終了 |
 

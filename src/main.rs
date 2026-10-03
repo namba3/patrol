@@ -19,7 +19,6 @@ use axum::{
     Router,
 };
 use futures::stream::StreamExt;
-use serde::Serialize;
 use std::sync::Arc;
 use tokio::io::AsyncBufReadExt;
 use tokio::sync::{broadcast, oneshot};
@@ -48,6 +47,12 @@ struct Args {
     )]
     worker_num: u8,
     #[clap(
+        long,
+        help = "Specify the maximum concurrent requests for simple mode.",
+        default_value_t = 10
+    )]
+    simple_worker_num: u16,
+    #[clap(
         short('i'),
         long,
         help = "Specify the patrol interval in minutes.",
@@ -67,6 +72,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("data_path:        {}", args.data_path);
     info!("interval_minutes: {}", args.interval_minutes);
     info!("worker_num:  {:?}", args.worker_num);
+    info!("simple_worker_num: {}", args.simple_worker_num);
 
     let (tx_doc_update, mut rx_doc_update) =
         tokio::sync::mpsc::unbounded_channel::<DocUpdateInfo>();
@@ -84,7 +90,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // let full_mode_poller = WebDriverPoller::new(args.webdriver_ports.as_slice()).await?;
     let full_mode_poller = PlaywrightPoller::new(args.worker_num).await?;
-    let simple_mode_poller = HttpPoller::new();
+    let simple_mode_poller = HttpPoller::new(args.simple_worker_num as usize);
 
     let poller = SelectivePoller::new(full_mode_poller, simple_mode_poller);
 
@@ -102,15 +108,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let message_dealer = tokio::spawn(async move {
         while let Some(x) = rx_doc_update.recv().await {
-            let msg = Message {
-                event: x.event,
-                id: x.id,
-                url: x.url,
-                timestamp: x.timestamp,
-                consecutive_failures: x.consecutive_failures,
-                error: x.error,
-            };
-            let msg = serde_json::to_string(&msg).unwrap();
+            let msg = serde_json::to_string(&x).unwrap();
 
             if let Err(why) = tx.send(msg) {
                 log::warn!("{why}");
@@ -179,26 +177,13 @@ async fn websocket(stream: WebSocket, state: Arc<AppState>) {
     }
 }
 
-#[derive(Serialize)]
-struct Message {
-    pub event: patrol::application::app::DocUpdateEvent,
-    pub id: String,
-    pub url: String,
-    pub timestamp: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub consecutive_failures: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
-
 #[cfg(test)]
 mod tests {
-    use super::Message;
-    use patrol::application::app::DocUpdateEvent;
+    use patrol::application::app::{DocUpdateEvent, DocUpdateInfo};
 
     #[test]
     fn websocket_failure_message_includes_event_and_failure_details() {
-        let message = Message {
+        let message = DocUpdateInfo {
             event: DocUpdateEvent::PollFailed,
             id: "Page".to_owned(),
             url: "https://example.com/page".to_owned(),
