@@ -186,8 +186,14 @@ where
     DataRepositoryError: std::error::Error,
     PollerError: std::error::Error,
 {
-    fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        todo!()
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        match self {
+            Error::ConfigRepositoryError(error) => {
+                write!(f, "configuration repository error: {error}")
+            }
+            Error::DataRepositoryError(error) => write!(f, "data repository error: {error}"),
+            Error::PollerError(error) => write!(f, "poller error: {error}"),
+        }
     }
 }
 
@@ -208,7 +214,7 @@ mod tests {
 
     use crate::{
         application::App,
-        domain::{Config, DataRepository, Hash, Id, Poller},
+        domain::{Config, ConfigRepository, DataRepository, Hash, Id, Poller},
         infrastructure::{TomlConfigRepository, TomlDataRepository},
     };
 
@@ -222,6 +228,44 @@ mod tests {
     }
 
     impl std::error::Error for TestPollerError {}
+
+    struct FailingConfigRepository;
+
+    #[async_trait::async_trait]
+    impl ConfigRepository for FailingConfigRepository {
+        type Error = TestPollerError;
+
+        async fn get_all(&mut self) -> Result<HashMap<Id, Config>, Self::Error> {
+            Err(TestPollerError)
+        }
+
+        async fn update(&mut self, _id: Id, _config: Config) -> Result<(), Self::Error> {
+            Err(TestPollerError)
+        }
+
+        async fn delete(&mut self, _id: Id) -> Result<Option<Config>, Self::Error> {
+            Err(TestPollerError)
+        }
+    }
+
+    #[test]
+    fn application_errors_have_readable_display_messages() {
+        type AppError = super::Error<TestPollerError, TestPollerError, TestPollerError>;
+
+        let config_error = AppError::ConfigRepositoryError(TestPollerError);
+        let data_error = AppError::DataRepositoryError(TestPollerError);
+        let poller_error = AppError::PollerError(TestPollerError);
+
+        assert_eq!(
+            config_error.to_string(),
+            "configuration repository error: test poller error"
+        );
+        assert_eq!(
+            data_error.to_string(),
+            "data repository error: test poller error"
+        );
+        assert_eq!(poller_error.to_string(), "poller error: test poller error");
+    }
 
     #[derive(Debug)]
     struct StaticPoller {
@@ -259,6 +303,32 @@ mod tests {
 
     fn temp_file(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("patrol-app-{name}-{}.toml", uuid::Uuid::new_v4()))
+    }
+
+    #[tokio::test]
+    async fn run_returns_config_repository_errors() {
+        let data_path = temp_file("config-error-data");
+        let data_repo = TomlDataRepository::new(data_path.to_str().unwrap())
+            .await
+            .unwrap();
+        let app = App::new(
+            FailingConfigRepository,
+            data_repo,
+            StaticPoller {
+                contents: HashMap::new(),
+            },
+            60,
+            Some(1),
+        );
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let result = app.run(tx).await;
+
+        assert!(matches!(
+            result,
+            Err(super::Error::ConfigRepositoryError(_))
+        ));
+        std::fs::remove_file(data_path).unwrap();
     }
 
     #[tokio::test]
