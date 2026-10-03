@@ -31,9 +31,9 @@ impl Hash {
         }
 
         let mut buf = [0u8; 32];
-        for (i, x) in s.as_bytes().chunks_exact(2).enumerate() {
-            let a = f(x[0]).ok_or(FromHashStrError {})?;
-            let b = f(x[1]).ok_or(FromHashStrError {})?;
+        for (i, [high, low]) in s.as_bytes().as_chunks::<2>().0.iter().enumerate() {
+            let a = f(*high).ok_or(FromHashStrError {})?;
+            let b = f(*low).ok_or(FromHashStrError {})?;
             buf[i] = a * 0x10 + b;
         }
 

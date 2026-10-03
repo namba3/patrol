@@ -3,9 +3,11 @@ use std::collections::{HashMap, HashSet};
 use futures_util::StreamExt;
 use log::{debug, info, warn};
 use prettytable::{color, row, Attr, Cell, Row, Table};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::domain::{self, Duration, Timestamp};
+
+const HISTORY_CONTENT_LIMIT_BYTES: usize = 4 * 1024;
 
 pub struct App<ConfigRepository, DataRepository, Poller> {
     config_repo: ConfigRepository,
@@ -33,6 +35,30 @@ pub struct DocUpdateInfo {
     pub consecutive_failures: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct DocChangeContent {
+    pub id: String,
+    pub timestamp_unix_ms: i64,
+    pub content: String,
+    pub content_truncated: bool,
+}
+
+pub struct DocChangeBatch {
+    pub changes: Vec<DocChangeContent>,
+    pub persisted: oneshot::Sender<bool>,
+}
+
+fn bounded_history_content(content: &str) -> (String, bool) {
+    if content.len() <= HISTORY_CONTENT_LIMIT_BYTES {
+        return (content.to_owned(), false);
+    }
+    let mut end = HISTORY_CONTENT_LIMIT_BYTES;
+    while !content.is_char_boundary(end) {
+        end -= 1;
+    }
+    (content[..end].to_owned(), true)
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -86,6 +112,15 @@ where
         self,
         tx_doc_update: mpsc::Sender<DocUpdateInfo>,
         tx_status: watch::Sender<Vec<DocStatus>>,
+    ) -> Result<(), Error<ConfigRepository::Error, DataRepository::Error, Poller::Error>> {
+        self.run_with_history(tx_doc_update, tx_status, None).await
+    }
+
+    pub async fn run_with_history(
+        self,
+        tx_doc_update: mpsc::Sender<DocUpdateInfo>,
+        tx_status: watch::Sender<Vec<DocStatus>>,
+        tx_history: Option<mpsc::Sender<DocChangeBatch>>,
     ) -> Result<(), Error<ConfigRepository::Error, DataRepository::Error, Poller::Error>> {
         let Self {
             mut data_repo,
@@ -172,10 +207,11 @@ where
             let mut rem = poll_configs;
             let mut latest_errors = HashMap::new();
             let mut successful_hashes = HashMap::new();
+            let mut successful_contents = HashMap::new();
             let mut empty_successes = HashSet::new();
             let mut retry = 3;
 
-            while 0 < rem.len() && 0 < retry {
+            while !rem.is_empty() && 0 < retry && tokio::time::Instant::now() < deadline {
                 let poll_stream = poller.poll_multiple(rem.clone()).await;
                 tokio::pin!(poll_stream);
 
@@ -204,6 +240,9 @@ where
 
                     let hash = domain::Hash::new(content.as_bytes());
                     successful_hashes.insert(id.clone(), hash);
+                    if tx_history.is_some() {
+                        successful_contents.insert(id.clone(), bounded_history_content(content));
+                    }
                     let _ = rem.remove(&id);
                 }
 
@@ -220,6 +259,8 @@ where
                 })
                 .collect();
             let empty_success_ids = empty_successes.iter().cloned().collect::<Vec<_>>();
+            let mut history_changes = Vec::new();
+            let mut cycle_updates = Vec::new();
             match data_repo
                 .record_poll_results(successful_hashes, empty_successes, failures.clone())
                 .await
@@ -227,60 +268,84 @@ where
                 Ok(batch) => {
                     for (id, timestamp) in batch.changed_at {
                         if let Some(timestamp) = timestamp {
-                            let _ = tx_doc_update
-                                .send(DocUpdateInfo {
-                                    event: DocUpdateEvent::Changed,
-                                    id: id.to_string(),
-                                    url: configs[&id].url.as_str().to_owned(),
-                                    timestamp: timestamp.to_string(),
-                                    consecutive_failures: None,
-                                    error: None,
-                                })
-                                .await;
+                            if tx_history.is_some() {
+                                if let Some((content, content_truncated)) =
+                                    successful_contents.remove(&id)
+                                {
+                                    history_changes.push(DocChangeContent {
+                                        id: id.to_string(),
+                                        timestamp_unix_ms: timestamp.unix_millis(),
+                                        content,
+                                        content_truncated,
+                                    });
+                                }
+                            }
+                            cycle_updates.push(DocUpdateInfo {
+                                event: DocUpdateEvent::Changed,
+                                id: id.to_string(),
+                                url: configs[&id].url.as_str().to_owned(),
+                                timestamp: timestamp.to_string(),
+                                consecutive_failures: None,
+                                error: None,
+                            });
                         }
 
                         if failed_ids.remove(&id) {
-                            let _ = tx_doc_update
-                                .send(DocUpdateInfo {
-                                    event: DocUpdateEvent::PollRecovered,
-                                    id: id.to_string(),
-                                    url: configs[&id].url.as_str().to_owned(),
-                                    timestamp: Timestamp::now().to_string(),
-                                    consecutive_failures: None,
-                                    error: None,
-                                })
-                                .await;
+                            cycle_updates.push(DocUpdateInfo {
+                                event: DocUpdateEvent::PollRecovered,
+                                id: id.to_string(),
+                                url: configs[&id].url.as_str().to_owned(),
+                                timestamp: Timestamp::now().to_string(),
+                                consecutive_failures: None,
+                                error: None,
+                            });
                         }
                     }
 
                     for id in empty_success_ids {
                         if failed_ids.remove(&id) {
-                            let _ = tx_doc_update
-                                .send(DocUpdateInfo {
-                                    event: DocUpdateEvent::PollRecovered,
-                                    id: id.to_string(),
-                                    url: configs[&id].url.as_str().to_owned(),
-                                    timestamp: Timestamp::now().to_string(),
-                                    consecutive_failures: None,
-                                    error: None,
-                                })
-                                .await;
+                            cycle_updates.push(DocUpdateInfo {
+                                event: DocUpdateEvent::PollRecovered,
+                                id: id.to_string(),
+                                url: configs[&id].url.as_str().to_owned(),
+                                timestamp: Timestamp::now().to_string(),
+                                consecutive_failures: None,
+                                error: None,
+                            });
                         }
                     }
 
                     for (id, consecutive_failures) in batch.failure_counts {
                         if failed_ids.insert(id.clone()) {
-                            let _ = tx_doc_update
-                                .send(DocUpdateInfo {
-                                    event: DocUpdateEvent::PollFailed,
-                                    id: id.to_string(),
-                                    url: configs[&id].url.as_str().to_owned(),
-                                    timestamp: Timestamp::now().to_string(),
-                                    consecutive_failures: Some(consecutive_failures),
-                                    error: failures.get(&id).cloned(),
-                                })
-                                .await;
+                            cycle_updates.push(DocUpdateInfo {
+                                event: DocUpdateEvent::PollFailed,
+                                id: id.to_string(),
+                                url: configs[&id].url.as_str().to_owned(),
+                                timestamp: Timestamp::now().to_string(),
+                                consecutive_failures: Some(consecutive_failures),
+                                error: failures.get(&id).cloned(),
+                            });
                         }
+                    }
+
+                    if let Some(tx_history) = &tx_history {
+                        if !history_changes.is_empty() {
+                            let (tx_persisted, rx_persisted) = oneshot::channel();
+                            if tx_history
+                                .send(DocChangeBatch {
+                                    changes: history_changes,
+                                    persisted: tx_persisted,
+                                })
+                                .await
+                                .is_err()
+                                || !matches!(rx_persisted.await, Ok(true))
+                            {
+                                warn!("change history was not confirmed as saved");
+                            }
+                        }
+                    }
+                    for update in cycle_updates {
+                        let _ = tx_doc_update.send(update).await;
                     }
                 }
                 Err(error) => warn!("failed to save polling results: {error}"),
@@ -333,10 +398,7 @@ where
                     })
                     .collect(),
             );
-            let mut data_list: Vec<_> = configs
-                .iter()
-                .map(|(id, _)| (id, data_map.get(id)))
-                .collect();
+            let mut data_list: Vec<_> = configs.keys().map(|id| (id, data_map.get(id))).collect();
             data_list.sort_by_key(|(_, data)| data.and_then(|data| data.last_updated));
 
             let now = Timestamp::now();
@@ -429,12 +491,15 @@ mod tests {
     };
 
     use futures_util::{stream, Stream};
+    use tokio::sync::watch;
 
     use crate::{
         application::App,
         domain::{Config, ConfigRepository, Data, DataRepository, Hash, Id, Poller, Timestamp},
         infrastructure::{TomlConfigRepository, TomlDataRepository},
     };
+
+    use super::{bounded_history_content, HISTORY_CONTENT_LIMIT_BYTES};
 
     #[derive(Debug, Clone)]
     struct TestPollerError;
@@ -613,6 +678,23 @@ mod tests {
         }
     }
 
+    struct PendingPoller(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+    #[async_trait::async_trait]
+    impl Poller for PendingPoller {
+        type Error = TestPollerError;
+        type Stream = Pin<Box<dyn Stream<Item = (Id, Result<String, Self::Error>)> + Send>>;
+
+        async fn poll(&mut self, _id: Id, _config: Config) -> Result<String, Self::Error> {
+            std::future::pending().await
+        }
+
+        async fn poll_multiple(&mut self, _configs: HashMap<Id, Config>) -> Self::Stream {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(stream::pending())
+        }
+    }
+
     fn temp_file(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("patrol-app-{name}-{}.toml", uuid::Uuid::new_v4()))
     }
@@ -641,6 +723,38 @@ mod tests {
             result,
             Err(super::Error::ConfigRepositoryError(_))
         ));
+        std::fs::remove_file(data_path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn run_does_not_start_retries_after_cycle_deadline() {
+        let data_path = temp_file("deadline-retries-data");
+        let id = Id::try_from("Page".to_owned()).unwrap();
+        let config = Config {
+            url: crate::domain::Url::new("https://example.com/page".to_owned()).unwrap(),
+            selector: crate::domain::Selector::new("main".to_owned()).unwrap(),
+            mode: crate::domain::Mode::Simple,
+            wait_seconds: None,
+            exclude_selectors: Vec::new(),
+            normalize_whitespace: false,
+            poll_interval_minutes: None,
+        };
+        let config_repo = ReloadingConfigRepository {
+            id,
+            config: config.clone(),
+            next_config: config,
+        };
+        let data_repo = TomlDataRepository::new(data_path.to_str().unwrap())
+            .await
+            .unwrap();
+        let poller_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let poller = PendingPoller(poller_calls.clone());
+        let app = App::new(config_repo, data_repo, poller, 1, Some(1));
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+
+        app.run(tx).await.unwrap();
+
+        assert_eq!(poller_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         std::fs::remove_file(data_path).unwrap();
     }
 
@@ -828,14 +942,26 @@ mode = "simple"
         };
         let app = App::new(config_repo, data_repo, poller, 60, Some(1));
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let (tx_history, mut rx_history) = tokio::sync::mpsc::channel(16);
 
-        app.run(tx).await.unwrap();
+        let app_task =
+            tokio::spawn(app.run_with_history(tx, watch::channel(Vec::new()).0, Some(tx_history)));
+
+        let history = rx_history.recv().await.unwrap();
+        assert!(rx.try_recv().is_err());
+        history.persisted.send(true).unwrap();
+        app_task.await.unwrap().unwrap();
 
         let update = rx.try_recv().unwrap();
         assert_eq!(update.event, super::DocUpdateEvent::Changed);
         assert_eq!(update.id, "ChangedPage");
         assert_eq!(update.url, "https://example.com/changed");
         assert!(rx.try_recv().is_err());
+        assert_eq!(history.changes.len(), 1);
+        assert_eq!(history.changes[0].id, "ChangedPage");
+        assert_eq!(history.changes[0].content, "updated text");
+        assert!(!history.changes[0].content_truncated);
+        assert!(history.changes[0].timestamp_unix_ms > 0);
 
         let mut data_repo = TomlDataRepository::new(data_path_string).await.unwrap();
         let changed = data_repo.get(changed_id).await.unwrap().unwrap();
@@ -849,6 +975,17 @@ mode = "simple"
         drop(data_repo);
         std::fs::remove_file(config_path).unwrap();
         std::fs::remove_file(data_path).unwrap();
+    }
+
+    #[test]
+    fn history_copy_is_bounded_without_changing_input_content() {
+        let content = "界".repeat(HISTORY_CONTENT_LIMIT_BYTES);
+        let (history_content, truncated) = bounded_history_content(&content);
+
+        assert!(truncated);
+        assert_eq!(history_content.len(), HISTORY_CONTENT_LIMIT_BYTES - 1);
+        assert_eq!(content.len(), HISTORY_CONTENT_LIMIT_BYTES * 3);
+        assert!(history_content.is_char_boundary(history_content.len()));
     }
 
     #[tokio::test]

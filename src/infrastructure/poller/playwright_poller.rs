@@ -67,8 +67,8 @@ impl Poller for PlaywrightPoller {
         let client_pool = self.client_pool.clone();
         let page_count = self.pool_size;
         let concurrency = usize::from(page_count);
-        let (tx, mut rx) = tokio::sync::mpsc::channel(concurrency);
-        tokio::spawn(async move {
+        let (tx, rx) = tokio::sync::mpsc::channel(concurrency);
+        let producer = tokio::spawn(async move {
             stream::iter(configs)
                 .for_each_concurrent(concurrency, |(id, config)| {
                     let client_pool = client_pool.clone();
@@ -92,7 +92,7 @@ impl Poller for PlaywrightPoller {
                         } = config;
                         let mut item = client_pool.get().await;
                         let client = item.client();
-                        debug!("[{}]: start polling {}", &id, url.as_str());
+                        debug!("[{}]: start polling {}", id, url.as_str());
                         let result = poll(
                             client,
                             url.as_str(),
@@ -101,15 +101,14 @@ impl Poller for PlaywrightPoller {
                             &exclude_selectors,
                             normalize,
                         )
-                        .await
-                        .map_err(Error::from);
+                        .await;
 
                         // This prevents the browser from spinning and wasting CPU resources
                         let _ = client.goto_builder("about:blank").goto().await;
 
                         match &result {
-                            Ok(_) => debug!("[{}]: polling succeeded", &id),
-                            Err(error) => debug!("[{}]: polling failed: {error}", &id),
+                            Ok(_) => debug!("[{}]: polling succeeded", id),
+                            Err(error) => debug!("[{}]: polling failed: {error}", id),
                         }
                         let _ = tx.send((id, result)).await;
                     }
@@ -117,10 +116,27 @@ impl Poller for PlaywrightPoller {
                 .await;
         });
 
-        async_stream::stream! {
-            while let Some(result) = rx.recv().await {
-                yield result;
-            }
+        stream_with_producer(producer, rx)
+    }
+}
+
+struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+fn stream_with_producer<T, Item>(
+    producer: tokio::task::JoinHandle<T>,
+    mut receiver: tokio::sync::mpsc::Receiver<Item>,
+) -> impl Stream<Item = Item> {
+    let producer = AbortOnDrop(producer);
+    async_stream::stream! {
+        let _producer = producer;
+        while let Some(item) = receiver.recv().await {
+            yield item;
         }
     }
 }
@@ -226,7 +242,7 @@ async fn poll(
         _ => (),
     }
 
-    let timeout = std::time::Duration::from_secs(30 as u64);
+    let timeout = std::time::Duration::from_secs(30_u64);
     let elem = tokio::time::timeout(timeout, fut)
         .await??
         .ok_or(Error::Unknown)?;
@@ -276,19 +292,6 @@ impl From<std::io::Error> for Error {
         Error::IOError(e)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::PlaywrightPoller;
-
-    #[tokio::test]
-    async fn defers_browser_startup_and_uses_at_least_one_page() {
-        let poller = PlaywrightPoller::new(0).await.unwrap();
-
-        assert_eq!(poller.pool_size, 1);
-        assert!(poller.client_pool.get().is_none());
-    }
-}
 impl From<Arc<playwright::Error>> for Error {
     fn from(e: Arc<playwright::Error>) -> Self {
         Error::PlaywrightError(e)
@@ -297,5 +300,53 @@ impl From<Arc<playwright::Error>> for Error {
 impl From<tokio::time::error::Elapsed> for Error {
     fn from(e: tokio::time::error::Elapsed) -> Self {
         Error::Timeout(e)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{future::pending, time::Duration};
+
+    use tokio::sync::oneshot;
+
+    use super::{stream_with_producer, PlaywrightPoller};
+
+    struct NotifyOnDrop(Option<oneshot::Sender<()>>);
+
+    impl Drop for NotifyOnDrop {
+        fn drop(&mut self) {
+            if let Some(signal) = self.0.take() {
+                let _ = signal.send(());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn defers_browser_startup_and_uses_at_least_one_page() {
+        let poller = PlaywrightPoller::new(0).await.unwrap();
+
+        assert_eq!(poller.pool_size, 1);
+        assert!(poller.client_pool.get().is_none());
+    }
+
+    #[tokio::test]
+    async fn dropping_unpolled_result_stream_cancels_producer() {
+        let (started_tx, started_rx) = oneshot::channel();
+        let (dropped_tx, dropped_rx) = oneshot::channel();
+        let (_result_tx, result_rx) = tokio::sync::mpsc::channel::<()>(1);
+        let task = tokio::spawn(async move {
+            let _notify = NotifyOnDrop(Some(dropped_tx));
+            let _ = started_tx.send(());
+            pending::<()>().await;
+        });
+        let result_stream = stream_with_producer(task, result_rx);
+
+        started_rx.await.unwrap();
+        drop(result_stream);
+
+        tokio::time::timeout(Duration::from_secs(1), dropped_rx)
+            .await
+            .unwrap()
+            .unwrap();
     }
 }

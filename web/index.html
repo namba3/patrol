@@ -20,6 +20,14 @@
       .status-failed { color: #d33; }
       .events { list-style: none; padding: 0; }
       .events li { border-bottom: 1px solid #8886; padding: .5rem 0; overflow-wrap: anywhere; }
+      dialog { border: 1px solid #8888; border-radius: .6rem; max-height: 80vh; max-width: min(900px, 90vw); width: 100%; }
+      dialog::backdrop { background: #0008; }
+      .history-entry { border-top: 1px solid #8886; padding: .8rem 0; }
+      .history-content { max-height: 16rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+      .history-diff { max-height: 24rem; overflow: auto; white-space: pre; }
+      .history-diff-line { display: block; min-height: 1.35em; padding: 0 .35rem; }
+      .history-diff-add { background: #21873933; }
+      .history-diff-remove { background: #d3333333; }
       code { overflow-wrap: anywhere; }
       @media (max-width: 650px) { body { padding: 1rem; } th, td { padding: .5rem .35rem; } }
     </style>
@@ -40,7 +48,7 @@
         <div class="table-wrap">
           <table>
             <thead>
-              <tr><th>対象</th><th>状態</th><th>最終試行</th><th>最終成功</th><th>最終変更</th><th>エラー</th></tr>
+              <tr><th>対象</th><th>状態</th><th>最終試行</th><th>最終成功</th><th>最終変更</th><th>エラー</th><th>履歴</th></tr>
             </thead>
             <tbody id="status-rows"></tbody>
           </table>
@@ -66,6 +74,18 @@
       </section>
     </main>
 
+    <dialog id="history-dialog" aria-labelledby="history-title">
+      <h2 id="history-title">変更履歴</h2>
+      <p id="history-message" class="muted"></p>
+      <div class="filters">
+        <button id="history-newer" type="button" disabled>新しい履歴</button>
+        <button id="history-older" type="button" disabled>古い履歴</button>
+      </div>
+      <button id="history-retry" type="button" hidden>再試行</button>
+      <div id="history-entries"></div>
+      <form method="dialog"><button type="submit">閉じる</button></form>
+    </dialog>
+
     <script>
       const rows = document.querySelector("#status-rows");
       const connection = document.querySelector("#connection");
@@ -73,6 +93,15 @@
       const events = document.querySelector("#events");
       const idFilter = document.querySelector("#event-id");
       const eventFilter = document.querySelector("#event-type");
+      const historyDialog = document.querySelector("#history-dialog");
+      const historyEntries = document.querySelector("#history-entries");
+      const historyMessage = document.querySelector("#history-message");
+      const historyNewer = document.querySelector("#history-newer");
+      const historyOlder = document.querySelector("#history-older");
+      const historyRetry = document.querySelector("#history-retry");
+      const historyPageSize = 50;
+      let currentHistoryId;
+      let currentHistoryOffset = 0;
       let eventSocket;
       let reconnectTimer;
 
@@ -86,6 +115,125 @@
       function formatTime(unixMillis) {
         return unixMillis == null ? "—" : new Date(unixMillis).toLocaleString();
       }
+
+      function renderDiff(before, after) {
+        const beforeLines = before.split("\n");
+        const afterLines = after.split("\n");
+        const width = afterLines.length + 1;
+        if (beforeLines.length * afterLines.length > 65536) return null;
+
+        const lcs = new Uint16Array((beforeLines.length + 1) * width);
+        for (let i = beforeLines.length - 1; i >= 0; i--) {
+          for (let j = afterLines.length - 1; j >= 0; j--) {
+            const index = i * width + j;
+            lcs[index] = beforeLines[i] === afterLines[j]
+              ? lcs[(i + 1) * width + j + 1] + 1
+              : Math.max(lcs[(i + 1) * width + j], lcs[index + 1]);
+          }
+        }
+
+        const diff = document.createElement("pre");
+        diff.className = "history-diff";
+        const addLine = (prefix, value, className) => {
+          const line = document.createElement("span");
+          line.className = `history-diff-line ${className}`;
+          line.textContent = `${prefix}${value || " "}`;
+          diff.append(line);
+        };
+        let i = 0;
+        let j = 0;
+        while (i < beforeLines.length || j < afterLines.length) {
+          if (i < beforeLines.length && j < afterLines.length && beforeLines[i] === afterLines[j]) {
+            addLine(" ", beforeLines[i], "");
+            i++;
+            j++;
+          } else if (i < beforeLines.length && (j === afterLines.length || lcs[(i + 1) * width + j] >= lcs[i * width + j + 1])) {
+            addLine("− ", beforeLines[i], "history-diff-remove");
+            i++;
+          } else {
+            addLine("+ ", afterLines[j], "history-diff-add");
+            j++;
+          }
+        }
+        return diff;
+      }
+
+      function appendSnapshot(section, label, content) {
+        const title = document.createElement("strong");
+        title.textContent = label;
+        const snapshot = document.createElement("pre");
+        snapshot.className = "history-content";
+        snapshot.textContent = content;
+        section.append(title, snapshot);
+      }
+
+      async function showHistory(id, offset = 0) {
+        currentHistoryId = id;
+        currentHistoryOffset = offset;
+        historyEntries.replaceChildren();
+        historyMessage.textContent = "履歴を読み込み中…";
+        historyNewer.disabled = true;
+        historyOlder.disabled = true;
+        historyRetry.hidden = true;
+        historyDialog.showModal();
+        try {
+          const query = new URLSearchParams({
+            id,
+            limit: String(historyPageSize),
+            offset: String(offset),
+          });
+          const response = await fetch(`/api/v1/history?${query}`, { cache: "no-store" });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const page = await response.json();
+          historyMessage.textContent = page.total
+            ? `${id} の変更履歴（${page.total}件中 ${page.offset + 1}〜${page.offset + page.entries.length}件）`
+            : "変更履歴はありません。";
+          historyNewer.disabled = !page.has_newer;
+          historyOlder.disabled = !page.has_older;
+          for (const entry of page.entries) {
+            const section = document.createElement("section");
+            section.className = "history-entry";
+            const heading = document.createElement("h3");
+            heading.textContent = formatTime(entry.timestamp_unix_ms);
+            section.append(heading);
+            if (entry.previous_content !== null) {
+              const diffTitle = document.createElement("strong");
+              diffTitle.textContent = `差分${entry.previous_truncated || entry.content_truncated ? "（保存された先頭4 KiB同士の比較）" : ""}`;
+              section.append(diffTitle);
+              const diff = renderDiff(entry.previous_content, entry.content);
+              if (diff) {
+                section.append(diff);
+              } else {
+                const notice = document.createElement("p");
+                notice.className = "muted";
+                notice.textContent = "行数が多いため差分計算を省略しました。保存された本文を表示します。";
+                section.append(notice);
+                appendSnapshot(section, "変更前", entry.previous_content);
+                appendSnapshot(section, "変更後", entry.content);
+              }
+            } else {
+              const first = document.createElement("p");
+              first.textContent = "変更前の内容は履歴にありません。";
+              section.append(first);
+              appendSnapshot(section, "保存された内容", entry.content);
+            }
+            historyEntries.append(section);
+          }
+        } catch (error) {
+          historyMessage.textContent = `履歴を取得できません: ${error.message}`;
+          historyRetry.hidden = false;
+        }
+      }
+
+      historyRetry.addEventListener("click", () => {
+        showHistory(currentHistoryId, currentHistoryOffset);
+      });
+      historyNewer.addEventListener("click", () => {
+        showHistory(currentHistoryId, Math.max(0, currentHistoryOffset - historyPageSize));
+      });
+      historyOlder.addEventListener("click", () => {
+        showHistory(currentHistoryId, currentHistoryOffset + historyPageSize);
+      });
 
       async function refreshStatus() {
         try {
@@ -122,6 +270,13 @@
             row.append(cell(formatTime(item.last_success_unix_ms)));
             row.append(cell(formatTime(item.last_updated_unix_ms)));
             row.append(cell(item.last_error ?? ""));
+            const historyCell = document.createElement("td");
+            const historyButton = document.createElement("button");
+            historyButton.type = "button";
+            historyButton.textContent = "表示";
+            historyButton.addEventListener("click", () => showHistory(item.id));
+            historyCell.append(historyButton);
+            row.append(historyCell);
             rows.append(row);
           }
           updated.textContent = `更新: ${new Date().toLocaleTimeString()} ・ ${statusList.length} 件`;

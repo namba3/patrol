@@ -42,14 +42,10 @@ pub struct Data {
     pub last_error: Option<String>,
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Mode {
     Simple,
+    #[default]
     Full,
-}
-impl Default for Mode {
-    fn default() -> Self {
-        Mode::Full
-    }
 }

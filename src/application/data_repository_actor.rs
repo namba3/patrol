@@ -120,12 +120,15 @@ enum Message<E> {
 pub struct DataRepositoryActorClient<DataRepository: domain::DataRepository> {
     tx_message: mpsc::Sender<Message<DataRepository::Error>>,
 }
-impl<DataRepository: domain::DataRepository> DataRepositoryActorClient<DataRepository> {
-    pub fn clone(&self) -> Self {
-        let tx_message = self.tx_message.clone();
-        Self { tx_message }
+impl<DataRepository: domain::DataRepository> Clone for DataRepositoryActorClient<DataRepository> {
+    fn clone(&self) -> Self {
+        Self {
+            tx_message: self.tx_message.clone(),
+        }
     }
+}
 
+impl<DataRepository: domain::DataRepository> DataRepositoryActorClient<DataRepository> {
     async fn send_update_multiple(
         &mut self,
         map: HashMap<Id, domain::Hash>,

@@ -5,6 +5,7 @@ use std::fmt::Display;
 #[derive(Serialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Id(String);
 impl Id {
+    #[allow(clippy::new_without_default)] // Generating a random ID should remain explicit.
     pub fn new() -> Self {
         let mut buf = [0u8; 32];
         let s = uuid::Uuid::new_v4().simple().encode_lower(&mut buf);
@@ -24,7 +25,7 @@ impl TryFrom<String> for Id {
     type Error = FromStringError;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        if 0 < value.len() {
+        if !value.is_empty() {
             Ok(Self(value))
         } else {
             Err(FromStringError {})

@@ -1,8 +1,10 @@
+pub mod change_history_repository;
 pub mod config_repository;
 pub mod data_repository;
 pub mod poller;
 pub mod toml_file_proxy;
 
+pub use self::change_history_repository::*;
 pub use self::config_repository::*;
 pub use self::data_repository::*;
 pub use self::poller::*;

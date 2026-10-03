@@ -16,9 +16,9 @@ impl Url {
         &self.0
     }
 }
-impl Into<String> for Url {
-    fn into(self) -> String {
-        self.0
+impl From<Url> for String {
+    fn from(url: Url) -> Self {
+        url.0
     }
 }
 impl AsRef<str> for Url {
@@ -74,6 +74,8 @@ mod tests {
         let url = Url::new("https://example.com/path?q=1".to_owned()).unwrap();
 
         assert_eq!(url.as_str(), "https://example.com/path?q=1");
+        let owned: String = url.into();
+        assert_eq!(owned, "https://example.com/path?q=1");
     }
 
     #[test]

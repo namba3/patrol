@@ -45,9 +45,9 @@ impl From<Config> for TomlConfig {
         }
     }
 }
-impl Into<Config> for TomlConfig {
-    fn into(self) -> Config {
-        let Self {
+impl From<TomlConfig> for Config {
+    fn from(config: TomlConfig) -> Self {
+        let TomlConfig {
             url,
             selector,
             mode,
@@ -55,8 +55,8 @@ impl Into<Config> for TomlConfig {
             exclude_selectors,
             normalize_whitespace,
             poll_interval_minutes,
-        } = self;
-        Config {
+        } = config;
+        Self {
             url,
             selector,
             mode: mode.unwrap_or_default(),
@@ -126,7 +126,7 @@ impl ConfigRepository for TomlConfigRepository {
     async fn get_all(&mut self) -> Result<HashMap<Id, Config>, Self::Error> {
         let map = self.proxy.get_cache().unwrap();
         let map = map
-            .into_iter()
+            .iter()
             .map(|(id, config)| (id.clone(), config.clone().into()))
             .collect();
         Ok(map)

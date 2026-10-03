@@ -18,6 +18,7 @@ where
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(&path)
             .await?;
         let path = tokio::fs::canonicalize(path).await?;
@@ -84,8 +85,8 @@ where
     }
 
     pub async fn get_cache_or_load(&mut self) -> Result<&T, Error> {
-        if self.cache.is_some() {
-            return Ok(self.cache.as_ref().unwrap());
+        if let Some(cache) = self.cache.as_ref() {
+            return Ok(cache);
         }
         self.load().await
     }
@@ -119,6 +120,16 @@ impl std::error::Error for Error {}
 impl From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Self {
         Error::IoError(e)
+    }
+}
+impl From<toml::de::Error> for Error {
+    fn from(e: toml::de::Error) -> Self {
+        Error::TomlError(e)
+    }
+}
+impl From<toml::ser::Error> for Error {
+    fn from(e: toml::ser::Error) -> Self {
+        Error::TomlSerializeError(e)
     }
 }
 
@@ -167,6 +178,21 @@ mod tests {
         assert!(matches!(proxy.save().await, Err(Error::CacheEmpty)));
 
         drop(proxy);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn opening_existing_file_preserves_its_contents() {
+        let path = temp_toml_path();
+        let original = "existing = \"value\"\n";
+        std::fs::write(&path, original).unwrap();
+
+        let proxy = TomlFileProxy::<HashMap<String, String>>::new(path.to_str().unwrap())
+            .await
+            .unwrap();
+        drop(proxy);
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
         std::fs::remove_file(path).unwrap();
     }
 
@@ -229,15 +255,5 @@ mod tests {
 
         drop(reloaded);
         std::fs::remove_file(path).unwrap();
-    }
-}
-impl From<toml::de::Error> for Error {
-    fn from(e: toml::de::Error) -> Self {
-        Error::TomlError(e)
-    }
-}
-impl From<toml::ser::Error> for Error {
-    fn from(e: toml::ser::Error) -> Self {
-        Error::TomlSerializeError(e)
     }
 }

@@ -26,7 +26,7 @@ impl TomlDataRepository {
             for restore_info in restore_infos {
                 self.restore(restore_info);
             }
-            Err(error.into())
+            Err(error)
         } else {
             Ok(restore_infos)
         }
@@ -95,7 +95,7 @@ impl DataRepository for TomlDataRepository {
 
     async fn get(&mut self, id: Id) -> Result<Option<Data>, Self::Error> {
         let map = self.proxy.get_cache().unwrap();
-        let data = map.get(&id).map(|x| x.clone());
+        let data = map.get(&id).cloned();
         Ok(data)
     }
 
@@ -111,7 +111,7 @@ impl DataRepository for TomlDataRepository {
     async fn get_all(&mut self) -> Result<HashMap<Id, Data>, Self::Error> {
         let map = self.proxy.get_cache().unwrap();
         let map = map
-            .into_iter()
+            .iter()
             .map(|(id, data)| (id.clone(), data.clone()))
             .collect();
         Ok(map)
