@@ -46,7 +46,7 @@ where
             None => return Err(Error::CacheEmpty),
         };
 
-        let toml = toml::to_string_pretty(cache).unwrap();
+        let toml = toml::to_string_pretty(cache)?;
 
         file.seek(SeekFrom::Start(0)).await?;
         file.set_len(0).await?;
@@ -86,6 +86,7 @@ where
 pub enum Error {
     IoError(std::io::Error),
     TomlError(toml::de::Error),
+    TomlSerializeError(toml::ser::Error),
     CacheEmpty,
 }
 impl Display for Error {
@@ -93,6 +94,9 @@ impl Display for Error {
         match self {
             Error::IoError(e) => f.write_fmt(format_args!("IO error: {e}")),
             Error::TomlError(e) => f.write_fmt(format_args!("Toml error: {e}")),
+            Error::TomlSerializeError(e) => {
+                f.write_fmt(format_args!("Toml serialization error: {e}"))
+            }
             Error::CacheEmpty => f.write_fmt(format_args!("Cache is empty.")),
         }
     }
@@ -110,6 +114,28 @@ mod tests {
 
     use super::{Error, TomlFileProxy};
 
+    struct FailsToSerialize;
+
+    impl serde::Serialize for FailsToSerialize {
+        fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            Err(serde::ser::Error::custom(
+                "intentional serialization failure",
+            ))
+        }
+    }
+
+    impl<'de> serde::Deserialize<'de> for FailsToSerialize {
+        fn deserialize<D>(_deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            Ok(Self)
+        }
+    }
+
     fn temp_toml_path() -> PathBuf {
         std::env::temp_dir().join(format!(
             "patrol-toml-file-proxy-{}.toml",
@@ -126,6 +152,21 @@ mod tests {
 
         assert!(matches!(proxy.save().await, Err(Error::CacheEmpty)));
 
+        drop(proxy);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn serialization_failure_is_returned_as_an_error() {
+        let path = temp_toml_path();
+        let mut proxy = TomlFileProxy::<FailsToSerialize>::new(path.to_str().unwrap())
+            .await
+            .unwrap();
+        proxy.update_cache(FailsToSerialize);
+
+        let result = proxy.save().await;
+
+        assert!(matches!(result, Err(Error::TomlSerializeError(_))));
         drop(proxy);
         std::fs::remove_file(path).unwrap();
     }
@@ -163,5 +204,10 @@ mod tests {
 impl From<toml::de::Error> for Error {
     fn from(e: toml::de::Error) -> Self {
         Error::TomlError(e)
+    }
+}
+impl From<toml::ser::Error> for Error {
+    fn from(e: toml::ser::Error) -> Self {
+        Error::TomlSerializeError(e)
     }
 }
