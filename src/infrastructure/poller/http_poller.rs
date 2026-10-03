@@ -48,7 +48,7 @@ async fn poll(client: &Client, config: Config) -> Result<String, Error> {
 
     let response = client.get(url.as_str()).send().await?.error_for_status()?;
     let txt = response.text().await?;
-    let selector: String = selector.into();
+    let selector = selector.parsed();
 
     tokio::task::spawn_blocking(move || extract_text(&txt, &selector))
         .await
@@ -85,9 +85,8 @@ impl From<reqwest::Error> for Error {
     }
 }
 
-fn extract_text(html: &str, selector: &str) -> String {
+fn extract_text(html: &str, selector: &scraper::Selector) -> String {
     let doc = Html::parse_document(html);
-    let selector = scraper::Selector::parse(selector).unwrap();
 
     let content = doc
         .select(&selector)
@@ -133,6 +132,7 @@ mod tests {
 
     #[test]
     fn extracts_trimmed_text_from_each_matching_element() {
+        let selector = Selector::new("p.selected".to_owned()).unwrap();
         let html = r#"
 <main>
   <p class="selected"> first </p>
@@ -141,12 +141,19 @@ mod tests {
 </main>
 "#;
 
-        assert_eq!(extract_text(html, "p.selected"), "first\nsecond\nnested");
+        assert_eq!(
+            extract_text(html, &selector.parsed()),
+            "first\nsecond\nnested"
+        );
     }
 
     #[test]
     fn returns_empty_text_when_selector_has_no_matches() {
-        assert_eq!(extract_text("<main><p>content</p></main>", ".missing"), "");
+        let selector = Selector::new(".missing".to_owned()).unwrap();
+        assert_eq!(
+            extract_text("<main><p>content</p></main>", &selector.parsed()),
+            ""
+        );
     }
 
     #[tokio::test]

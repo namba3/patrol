@@ -1,31 +1,73 @@
-use serde::Deserialize;
-use serde_derive::Serialize;
+use serde::{Deserialize, Serialize};
+use std::{
+    cmp::Ordering,
+    fmt::Display,
+    hash::{Hash, Hasher},
+    sync::Arc,
+};
 
-use std::fmt::Display;
-
-#[derive(Serialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Selector(String);
+#[derive(Debug, Clone)]
+pub struct Selector {
+    source: String,
+    parsed: Arc<scraper::Selector>,
+}
 impl Selector {
     pub fn new(selector: String) -> Result<Self, SelectorParseError> {
-        if let Err(_) = scraper::Selector::parse(selector.as_str()) {
-            return Err(SelectorParseError);
-        }
+        let parsed = scraper::Selector::parse(selector.as_str()).map_err(|_| SelectorParseError)?;
 
-        Ok(Self(selector))
+        Ok(Self {
+            source: selector,
+            parsed: Arc::new(parsed),
+        })
     }
 
     pub fn as_str(&self) -> &str {
-        &self.0
+        &self.source
+    }
+
+    pub(crate) fn parsed(&self) -> Arc<scraper::Selector> {
+        self.parsed.clone()
     }
 }
-impl Into<String> for Selector {
-    fn into(self) -> String {
-        self.0
+impl From<Selector> for String {
+    fn from(selector: Selector) -> Self {
+        selector.source
     }
 }
 impl AsRef<str> for Selector {
     fn as_ref(&self) -> &str {
         self.as_str()
+    }
+}
+
+impl Serialize for Selector {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl PartialEq for Selector {
+    fn eq(&self, other: &Self) -> bool {
+        self.source == other.source
+    }
+}
+impl Eq for Selector {}
+impl PartialOrd for Selector {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for Selector {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.source.cmp(&other.source)
+    }
+}
+impl Hash for Selector {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.source.hash(state);
     }
 }
 
@@ -70,6 +112,8 @@ impl Display for SelectorParseError {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::Selector;
 
     #[test]
@@ -87,5 +131,23 @@ mod tests {
     #[test]
     fn serde_rejects_invalid_css_selector() {
         assert!(serde_json::from_str::<Selector>("\"div[\"").is_err());
+    }
+
+    #[test]
+    fn serializes_as_the_original_selector_string() {
+        let selector = Selector::new("main article h1.title".to_owned()).unwrap();
+
+        assert_eq!(
+            serde_json::to_string(&selector).unwrap(),
+            "\"main article h1.title\""
+        );
+    }
+
+    #[test]
+    fn clones_share_the_parsed_selector() {
+        let selector = Selector::new("main article h1.title".to_owned()).unwrap();
+        let clone = selector.clone();
+
+        assert!(Arc::ptr_eq(&selector.parsed(), &clone.parsed()));
     }
 }
