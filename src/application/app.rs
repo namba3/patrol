@@ -37,7 +37,7 @@ pub struct DocUpdateInfo {
 
 impl<ConfigRepository, DataRepository, Poller> App<ConfigRepository, DataRepository, Poller>
 where
-    ConfigRepository: domain::ConfigRepository,
+    ConfigRepository: domain::ConfigRepository + Send,
     DataRepository: domain::DataRepository + Send + 'static,
     Poller: domain::Poller,
 
@@ -95,6 +95,10 @@ where
             info!("waiting for next interval period...");
             let now = interval.tick().await;
             let deadline = now + period;
+
+            if let Err(error) = config_repo.reload().await {
+                warn!("failed to reload configuration; keeping the last valid version: {error}");
+            }
 
             let configs = config_repo
                 .get_all()
@@ -348,6 +352,34 @@ mod tests {
         }
     }
 
+    struct ReloadingConfigRepository {
+        id: Id,
+        config: Config,
+        next_config: Config,
+    }
+
+    #[async_trait::async_trait]
+    impl ConfigRepository for ReloadingConfigRepository {
+        type Error = TestPollerError;
+
+        async fn reload(&mut self) -> Result<(), Self::Error> {
+            self.config = self.next_config.clone();
+            Ok(())
+        }
+
+        async fn get_all(&mut self) -> Result<HashMap<Id, Config>, Self::Error> {
+            Ok(HashMap::from([(self.id.clone(), self.config.clone())]))
+        }
+
+        async fn update(&mut self, _id: Id, _config: Config) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        async fn delete(&mut self, _id: Id) -> Result<Option<Config>, Self::Error> {
+            Ok(None)
+        }
+    }
+
     struct FailingUpdateRepository;
 
     #[async_trait::async_trait]
@@ -470,6 +502,39 @@ mod tests {
             result,
             Err(super::Error::ConfigRepositoryError(_))
         ));
+        std::fs::remove_file(data_path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn run_uses_configuration_reloaded_at_cycle_start() {
+        let data_path = temp_file("reload-config-data");
+        let id = Id::try_from("Page".to_owned()).unwrap();
+        let config = |url: &str| Config {
+            url: crate::domain::Url::new(url.to_owned()).unwrap(),
+            selector: crate::domain::Selector::new("main".to_owned()).unwrap(),
+            mode: crate::domain::Mode::Simple,
+            wait_seconds: None,
+        };
+        let config_repo = ReloadingConfigRepository {
+            id: id.clone(),
+            config: config("https://example.com/old"),
+            next_config: config("https://example.com/new"),
+        };
+        let data_repo = TomlDataRepository::new(data_path.to_str().unwrap())
+            .await
+            .unwrap();
+        let poller = StaticPoller {
+            contents: HashMap::from([(id, Ok("content".to_owned()))]),
+        };
+        let app = App::new(config_repo, data_repo, poller, 60, Some(1));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        app.run(tx).await.unwrap();
+
+        let update = rx.try_recv().unwrap();
+        assert_eq!(update.event, super::DocUpdateEvent::Changed);
+        assert_eq!(update.url, "https://example.com/new");
+
         std::fs::remove_file(data_path).unwrap();
     }
 

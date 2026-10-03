@@ -7,6 +7,7 @@
 - Application code should depend on domain traits rather than TOML, HTTP, or Playwright implementations.
 - `DataRepository::update` returns a timestamp only when the content hash changes. Empty extracted content does not change the saved content hash, but it records a successful poll status.
 - Poll failures are recorded after the in-cycle retries. Successful polls clear the consecutive failure count and last error.
+- Configuration is reloaded at the start of each patrol cycle; a failed reload keeps the last valid configuration active.
 - `DataRepositoryActor` exists but is not part of the current startup path in `src/main.rs`.
 
 ## Documentation

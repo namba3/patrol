@@ -5,6 +5,10 @@ use std::collections::HashMap;
 pub trait ConfigRepository {
     type Error: std::error::Error + Send;
 
+    async fn reload(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
     async fn get_all(&mut self) -> Result<HashMap<Id, Config>, Self::Error>;
 
     async fn update(&mut self, id: Id, config: Config) -> Result<(), Self::Error>;

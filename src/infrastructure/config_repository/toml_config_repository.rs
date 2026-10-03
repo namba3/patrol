@@ -51,6 +51,7 @@ impl Into<Config> for TomlConfig {
 }
 
 pub struct TomlConfigRepository {
+    path: String,
     proxy: TomlFileProxy<HashMap<Id, TomlConfig>>,
 }
 impl TomlConfigRepository {
@@ -59,7 +60,10 @@ impl TomlConfigRepository {
         let map = proxy.load().await?;
         debug!("{} has {} configurations.", path, map.len());
 
-        Ok(Self { proxy })
+        Ok(Self {
+            path: path.to_owned(),
+            proxy,
+        })
     }
 
     /// Updates the inner hashmap and returns the old element.
@@ -93,6 +97,13 @@ impl TomlConfigRepository {
 #[async_trait::async_trait]
 impl ConfigRepository for TomlConfigRepository {
     type Error = Error;
+
+    async fn reload(&mut self) -> Result<(), Self::Error> {
+        let mut proxy = TomlFileProxy::<HashMap<Id, TomlConfig>>::new(&self.path).await?;
+        proxy.load().await?;
+        self.proxy = proxy;
+        Ok(())
+    }
 
     async fn get_all(&mut self) -> Result<HashMap<Id, Config>, Self::Error> {
         let map = self.proxy.get_cache().unwrap();
@@ -254,6 +265,47 @@ wait_seconds = 3
         let result = TomlConfigRepository::new(path.to_str().unwrap()).await;
 
         assert!(result.is_err());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn reload_reads_replaced_files_and_keeps_last_valid_config() {
+        let path = temp_config_path();
+        let replacement_path = temp_config_path();
+        std::fs::write(
+            &path,
+            "[OldPage]\nurl = \"https://example.com/old\"\nselector = \"main\"\n",
+        )
+        .unwrap();
+        let path_string = path.to_str().unwrap();
+        let mut repository = TomlConfigRepository::new(path_string).await.unwrap();
+
+        std::fs::write(
+            &replacement_path,
+            "[NewPage]\nurl = \"https://example.com/new\"\nselector = \"article\"\n",
+        )
+        .unwrap();
+        std::fs::rename(&replacement_path, &path).unwrap();
+
+        repository.reload().await.unwrap();
+        let configs = repository.get_all().await.unwrap();
+        assert_eq!(configs.len(), 1);
+        assert_eq!(
+            configs[&Id::try_from("NewPage".to_owned()).unwrap()]
+                .url
+                .as_str(),
+            "https://example.com/new"
+        );
+
+        std::fs::write(&path, "[Broken\n").unwrap();
+        assert!(repository.reload().await.is_err());
+        let configs_after_invalid_edit = repository.get_all().await.unwrap();
+        assert_eq!(configs_after_invalid_edit.len(), 1);
+        assert!(
+            configs_after_invalid_edit.contains_key(&Id::try_from("NewPage".to_owned()).unwrap())
+        );
+
+        drop(repository);
         std::fs::remove_file(path).unwrap();
     }
 
