@@ -209,3 +209,128 @@ impl Display for ActorMessageError {
     }
 }
 impl std::error::Error for ActorMessageError {}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{HashMap, HashSet};
+
+    use super::DataRepositoryActor;
+    use crate::domain::{Data, DataRepository, Hash, Id, Timestamp};
+
+    #[derive(Default)]
+    struct InMemoryRepository {
+        data: HashMap<Id, Data>,
+    }
+
+    #[async_trait::async_trait]
+    impl DataRepository for InMemoryRepository {
+        type Error = std::io::Error;
+
+        async fn get(&mut self, id: Id) -> Result<Option<Data>, Self::Error> {
+            Ok(self.data.get(&id).cloned())
+        }
+
+        async fn get_multiple(
+            &mut self,
+            ids: HashSet<Id>,
+        ) -> Result<HashMap<Id, Data>, Self::Error> {
+            Ok(ids
+                .into_iter()
+                .filter_map(|id| self.data.get(&id).cloned().map(|data| (id, data)))
+                .collect())
+        }
+
+        async fn get_all(&mut self) -> Result<HashMap<Id, Data>, Self::Error> {
+            Ok(self.data.clone())
+        }
+
+        async fn update(&mut self, id: Id, hash: Hash) -> Result<Option<Timestamp>, Self::Error> {
+            let now = Timestamp::now();
+            let previous_hash = self.data.get(&id).and_then(|data| data.hash.clone());
+            let changed = previous_hash.as_ref() != Some(&hash);
+            let last_updated = if changed {
+                Some(now)
+            } else {
+                self.data.get(&id).and_then(|data| data.last_updated)
+            };
+
+            self.data.insert(
+                id,
+                Data {
+                    hash: Some(hash),
+                    last_updated,
+                    last_checked: now,
+                },
+            );
+            Ok(if changed { Some(now) } else { None })
+        }
+
+        async fn update_multiple(&mut self, map: HashMap<Id, Hash>) -> Result<(), Self::Error> {
+            for (id, hash) in map {
+                self.update(id, hash).await?;
+            }
+            Ok(())
+        }
+
+        async fn delete(&mut self, id: Id) -> Result<Option<Data>, Self::Error> {
+            Ok(self.data.remove(&id))
+        }
+    }
+
+    fn id(value: &str) -> Id {
+        Id::try_from(value.to_owned()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn client_forwards_repository_operations_and_clone_shares_actor() {
+        let mut client = DataRepositoryActor::new(InMemoryRepository::default())
+            .start()
+            .await;
+        let first_id = id("first");
+        let second_id = id("second");
+        let first_hash = Hash::new("first content");
+        let second_hash = Hash::new("second content");
+
+        assert!(client.get(first_id.clone()).await.unwrap().is_none());
+        let first_updated = client
+            .update(first_id.clone(), first_hash.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            client
+                .update(first_id.clone(), first_hash.clone())
+                .await
+                .unwrap(),
+            None
+        );
+        let first_data = client.get(first_id.clone()).await.unwrap().unwrap();
+        assert_eq!(first_data.hash, Some(first_hash.clone()));
+        assert_eq!(first_data.last_updated, Some(first_updated));
+
+        let updates = HashMap::from([(second_id.clone(), second_hash.clone())]);
+        client.update_multiple(updates).await.unwrap();
+        let selected = client
+            .get_multiple(HashSet::from([
+                first_id.clone(),
+                second_id.clone(),
+                id("missing"),
+            ]))
+            .await
+            .unwrap();
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[&second_id].hash, Some(second_hash));
+        assert_eq!(client.get_all().await.unwrap().len(), 2);
+
+        let mut cloned_client = client.clone();
+        let deleted = cloned_client
+            .delete(first_id.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(deleted.hash, Some(first_hash));
+        assert!(client.get(first_id.clone()).await.unwrap().is_none());
+        assert!(client.delete(first_id).await.unwrap().is_none());
+        assert_eq!(client.get_all().await.unwrap().len(), 1);
+    }
+}
