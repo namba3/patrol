@@ -78,3 +78,37 @@ impl Display for FromStringError {
 }
 
 impl std::error::Error for FromStringError {}
+
+#[cfg(test)]
+mod tests {
+    use super::Id;
+
+    #[test]
+    fn accepts_non_empty_ids_and_rejects_empty_ids() {
+        assert_eq!(
+            Id::try_from("README".to_owned()).unwrap().as_str(),
+            "README"
+        );
+        assert!(Id::try_from(String::new()).is_err());
+    }
+
+    #[test]
+    fn generated_id_is_32_lowercase_hex_characters() {
+        let id = Id::new();
+
+        assert_eq!(id.as_str().len(), 32);
+        assert!(id
+            .as_str()
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()));
+    }
+
+    #[test]
+    fn serde_round_trip_preserves_id() {
+        let id = Id::try_from("project-readme".to_owned()).unwrap();
+        let encoded = serde_json::to_string(&id).unwrap();
+        let decoded: Id = serde_json::from_str(&encoded).unwrap();
+
+        assert_eq!(decoded, id);
+    }
+}

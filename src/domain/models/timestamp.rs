@@ -17,8 +17,8 @@ impl Timestamp {
         Self::from_unix_nanos(millis * 1_000_000)
     }
     pub fn from_unix_nanos(nanos: i64) -> Self {
-        let secs = nanos / 1_000_000_000;
-        let subsec_nanos = (nanos / 1_000_000_000) as u32;
+        let secs = nanos.div_euclid(1_000_000_000);
+        let subsec_nanos = nanos.rem_euclid(1_000_000_000) as u32;
         let dt = DT::from_timestamp(secs, subsec_nanos).unwrap();
         Self(dt)
     }
@@ -90,5 +90,48 @@ impl Duration {
     }
     pub const fn from_nanos(nanos: u64) -> Self {
         Self(nanos)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Duration, Timestamp};
+
+    #[test]
+    fn unix_constructors_preserve_subsecond_precision() {
+        let timestamp = Timestamp::from_unix_nanos(1_234_567_890);
+
+        assert_eq!(timestamp.unix_secs(), 1);
+        assert_eq!(timestamp.unix_millis(), 1_234);
+        assert_eq!(timestamp.unix_nanos(), 1_234_567_890);
+        assert_eq!(Timestamp::from_unix_millis(1_234).unix_millis(), 1_234);
+    }
+
+    #[test]
+    fn unix_nanos_handles_negative_subsecond_timestamps() {
+        let timestamp = Timestamp::from_unix_nanos(-1);
+
+        assert_eq!(timestamp.unix_secs(), -1);
+        assert_eq!(timestamp.unix_nanos(), -1);
+    }
+
+    #[test]
+    fn arithmetic_uses_duration_units() {
+        let timestamp = Timestamp::from_unix_secs(100);
+
+        assert_eq!(
+            (timestamp + Duration::from_millis(250)).unix_nanos(),
+            100_250_000_000
+        );
+        assert_eq!((timestamp - Duration::from_secs(2)).unix_secs(), 98);
+    }
+
+    #[test]
+    fn serde_round_trip_preserves_timestamp() {
+        let timestamp = Timestamp::from_unix_millis(1_700_000_123_456);
+        let encoded = serde_json::to_string(&timestamp).unwrap();
+        let decoded: Timestamp = serde_json::from_str(&encoded).unwrap();
+
+        assert_eq!(decoded, timestamp);
     }
 }

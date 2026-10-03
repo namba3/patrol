@@ -151,3 +151,54 @@ struct RestoreInfo {
     id: Id,
     data: Option<Data>,
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::TomlDataRepository;
+    use crate::domain::{DataRepository, Hash, Id};
+
+    fn temp_data_path() -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "patrol-data-repository-{}.toml",
+            uuid::Uuid::new_v4()
+        ))
+    }
+
+    #[tokio::test]
+    async fn update_reports_changes_and_persists_data() {
+        let path = temp_data_path();
+        let path_string = path.to_str().unwrap();
+        let id = Id::try_from("example-page".to_owned()).unwrap();
+
+        let mut repository = TomlDataRepository::new(path_string).await.unwrap();
+        let first_hash = Hash::new("first version");
+        repository
+            .update(id.clone(), first_hash.clone())
+            .await
+            .unwrap()
+            .expect("first observation should be reported as an update");
+
+        let unchanged = repository.update(id.clone(), first_hash).await.unwrap();
+        assert_eq!(unchanged, None);
+
+        let second_hash = Hash::new("second version");
+        let second_updated = repository
+            .update(id.clone(), second_hash.clone())
+            .await
+            .unwrap()
+            .expect("a changed hash should be reported as an update");
+
+        drop(repository);
+
+        let mut reloaded = TomlDataRepository::new(path_string).await.unwrap();
+        let data = reloaded.get(id).await.unwrap().unwrap();
+        assert_eq!(data.hash, Some(second_hash));
+        assert_eq!(data.last_updated, Some(second_updated));
+        assert!(data.last_checked >= second_updated);
+
+        drop(reloaded);
+        std::fs::remove_file(path).unwrap();
+    }
+}

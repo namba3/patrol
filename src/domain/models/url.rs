@@ -64,3 +64,25 @@ impl Display for UrlParseError {
         f.write_str("failed to parse the URL.")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Url;
+
+    #[test]
+    fn accepts_absolute_urls_and_preserves_input() {
+        let url = Url::new("https://example.com/path?q=1".to_owned()).unwrap();
+
+        assert_eq!(url.as_str(), "https://example.com/path?q=1");
+    }
+
+    #[test]
+    fn rejects_invalid_urls() {
+        assert!(Url::new("not a url".to_owned()).is_err());
+    }
+
+    #[test]
+    fn serde_rejects_invalid_urls() {
+        assert!(serde_json::from_str::<Url>("\"not a url\"").is_err());
+    }
+}

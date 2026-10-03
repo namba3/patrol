@@ -199,3 +199,115 @@ where
     PollerError: std::error::Error,
 {
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::HashMap, fmt::Display, path::PathBuf, pin::Pin};
+
+    use futures_util::{stream, Stream};
+
+    use crate::{
+        application::App,
+        domain::{Config, DataRepository, Hash, Id, Poller},
+        infrastructure::{TomlConfigRepository, TomlDataRepository},
+    };
+
+    #[derive(Debug, Clone)]
+    struct TestPollerError;
+
+    impl Display for TestPollerError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("test poller error")
+        }
+    }
+
+    impl std::error::Error for TestPollerError {}
+
+    #[derive(Debug)]
+    struct StaticPoller {
+        contents: HashMap<Id, Result<String, TestPollerError>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Poller for StaticPoller {
+        type Error = TestPollerError;
+        type Stream = Pin<Box<dyn Stream<Item = (Id, Result<String, Self::Error>)> + Send>>;
+
+        async fn poll(&mut self, id: Id, _config: Config) -> Result<String, Self::Error> {
+            self.contents
+                .get(&id)
+                .cloned()
+                .unwrap_or_else(|| Ok(String::new()))
+        }
+
+        async fn poll_multiple(&mut self, configs: HashMap<Id, Config>) -> Self::Stream {
+            let results = configs
+                .into_keys()
+                .map(|id| {
+                    let result = self
+                        .contents
+                        .get(&id)
+                        .cloned()
+                        .unwrap_or_else(|| Ok(String::new()));
+                    (id, result)
+                })
+                .collect::<Vec<_>>();
+
+            Box::pin(stream::iter(results))
+        }
+    }
+
+    fn temp_file(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("patrol-app-{name}-{}.toml", uuid::Uuid::new_v4()))
+    }
+
+    #[tokio::test]
+    async fn run_notifies_non_empty_changes_and_ignores_empty_content() {
+        let config_path = temp_file("config");
+        let data_path = temp_file("data");
+        let config_text = r#"
+[ChangedPage]
+url = "https://example.com/changed"
+selector = "main"
+mode = "simple"
+
+[EmptyPage]
+url = "https://example.com/empty"
+selector = "main"
+mode = "simple"
+"#;
+        std::fs::write(&config_path, config_text).unwrap();
+
+        let config_path_string = config_path.to_str().unwrap();
+        let data_path_string = data_path.to_str().unwrap();
+        let config_repo = TomlConfigRepository::new(config_path_string).await.unwrap();
+        let data_repo = TomlDataRepository::new(data_path_string).await.unwrap();
+        let changed_id = Id::try_from("ChangedPage".to_owned()).unwrap();
+        let empty_id = Id::try_from("EmptyPage".to_owned()).unwrap();
+        let poller = StaticPoller {
+            contents: HashMap::from([
+                (changed_id.clone(), Ok("  updated text  \n".to_owned())),
+                (empty_id.clone(), Ok(" \n\t ".to_owned())),
+            ]),
+        };
+        let app = App::new(config_repo, data_repo, poller, 60, Some(1));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        app.run(tx).await.unwrap();
+
+        let update = rx.try_recv().unwrap();
+        assert_eq!(update.id, "ChangedPage");
+        assert_eq!(update.url, "https://example.com/changed");
+        assert!(rx.try_recv().is_err());
+
+        let mut data_repo = TomlDataRepository::new(data_path_string).await.unwrap();
+        let changed = data_repo.get(changed_id).await.unwrap().unwrap();
+        assert_eq!(changed.hash, Some(Hash::new("updated text")));
+        assert!(changed.last_updated.is_some());
+        assert!(data_repo.get(empty_id).await.unwrap().is_none());
+
+        drop(data_repo);
+        std::fs::remove_file(config_path).unwrap();
+        std::fs::remove_file(data_path).unwrap();
+    }
+}

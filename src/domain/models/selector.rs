@@ -67,3 +67,25 @@ impl Display for SelectorParseError {
         f.write_str("failed to parse the selector.")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Selector;
+
+    #[test]
+    fn accepts_valid_css_selector() {
+        let selector = Selector::new("main article h1.title".to_owned()).unwrap();
+
+        assert_eq!(selector.as_str(), "main article h1.title");
+    }
+
+    #[test]
+    fn rejects_invalid_css_selector() {
+        assert!(Selector::new("div[".to_owned()).is_err());
+    }
+
+    #[test]
+    fn serde_rejects_invalid_css_selector() {
+        assert!(serde_json::from_str::<Selector>("\"div[\"").is_err());
+    }
+}

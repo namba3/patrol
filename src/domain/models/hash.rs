@@ -105,3 +105,46 @@ impl Display for FromHashStrError {
 }
 
 impl std::error::Error for FromHashStrError {}
+
+#[cfg(test)]
+mod tests {
+    use super::Hash;
+
+    #[test]
+    fn hashes_bytes_as_sha256() {
+        let hash = Hash::new("abc");
+
+        assert_eq!(
+            hash.to_string(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn parses_uppercase_hex_and_formats_lowercase() {
+        let hash =
+            Hash::from_hash_str("BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD")
+                .unwrap();
+
+        assert_eq!(
+            hash.to_string(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_hash_strings() {
+        assert!(Hash::from_hash_str("abc").is_err());
+        assert!(Hash::from_hash_str(&"g".repeat(64)).is_err());
+    }
+
+    #[test]
+    fn serde_round_trip_uses_hex_string() {
+        let hash = Hash::new("patrol");
+        let encoded = serde_json::to_string(&hash).unwrap();
+        let decoded: Hash = serde_json::from_str(&encoded).unwrap();
+
+        assert_eq!(decoded, hash);
+        assert_eq!(encoded, format!("\"{hash}\""));
+    }
+}
