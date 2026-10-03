@@ -211,7 +211,8 @@ where
                 }
             }
 
-            let data_map = data_repo.get_all().await;
+            let configured_ids = configs.keys().cloned().collect();
+            let data_map = data_repo.get_multiple(configured_ids).await;
             let data_map = match data_map {
                 Ok(x) => x,
                 Err(why) => {
@@ -220,8 +221,8 @@ where
                 }
             };
             let mut data_list: Vec<_> = configs
-                .keys()
-                .map(|id| (id.clone(), data_map.get(id)))
+                .iter()
+                .map(|(id, _)| (id, data_map.get(id)))
                 .collect();
             data_list.sort_by_key(|(_, data)| data.and_then(|data| data.last_updated));
 
@@ -233,7 +234,7 @@ where
 
             table.add_row(row!["name", "status", "last_updated", "url",]);
             for (id, data) in data_list {
-                let config = &configs[&id];
+                let config = &configs[id];
                 let status = match data {
                     Some(data) if data.consecutive_failures > 0 => {
                         format!("failed ({})", data.consecutive_failures)
