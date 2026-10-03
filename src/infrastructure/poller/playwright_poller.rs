@@ -1,4 +1,5 @@
 use std::{collections::HashMap, fmt::Display, sync::Arc};
+use std::{future::Future, time::Duration};
 
 use futures_util::{stream, Stream, StreamExt};
 use log::debug;
@@ -13,11 +14,12 @@ use crate::infrastructure::poller::normalize_whitespace;
 use tokio::sync::OnceCell;
 
 static PLAYWRIGHT: OnceCell<Playwright> = OnceCell::const_new();
+const BROWSER_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug)]
 pub struct PlaywrightPoller {
     pool_size: u8,
-    client_pool: Arc<OnceCell<Result<ClientPool, String>>>,
+    client_pool: Arc<OnceCell<ClientPool>>,
 }
 
 impl PlaywrightPoller {
@@ -58,8 +60,7 @@ impl Poller for PlaywrightPoller {
         )
         .await;
 
-        // This prevents the browser from spinning and wasting CPU resources
-        let _ = client.goto_builder("about:blank").goto().await;
+        reset_page(client).await;
         result
     }
 
@@ -103,8 +104,7 @@ impl Poller for PlaywrightPoller {
                         )
                         .await;
 
-                        // This prevents the browser from spinning and wasting CPU resources
-                        let _ = client.goto_builder("about:blank").goto().await;
+                        reset_page(client).await;
 
                         match &result {
                             Ok(_) => debug!("[{}]: polling succeeded", id),
@@ -142,20 +142,19 @@ fn stream_with_producer<T, Item>(
 }
 
 async fn get_or_initialize_pool(
-    client_pool: &OnceCell<Result<ClientPool, String>>,
+    client_pool: &OnceCell<ClientPool>,
     pool_size: u8,
 ) -> Result<ClientPool, Error> {
-    match client_pool
-        .get_or_init(|| async {
-            ClientPool::new(pool_size)
-                .await
-                .map_err(|error| error.to_string())
-        })
-        .await
-    {
-        Ok(client_pool) => Ok(client_pool.clone()),
-        Err(error) => Err(Error::Other(error.clone())),
-    }
+    let client_pool = get_or_try_init(client_pool, || ClientPool::new(pool_size)).await?;
+    Ok(client_pool.clone())
+}
+
+async fn get_or_try_init<T, E, Init, Fut>(cell: &OnceCell<T>, initialize: Init) -> Result<&T, E>
+where
+    Init: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+{
+    cell.get_or_try_init(initialize).await
 }
 
 #[derive(Debug, Clone)]
@@ -227,7 +226,10 @@ async fn poll(
     exclude_selectors: &[crate::domain::Selector],
     normalize: bool,
 ) -> Result<String, Error> {
-    let _resp = page.goto_builder(url).goto().await?.ok_or(Error::Unknown)?;
+    let navigation = async { page.goto_builder(url).goto().await.map_err(Error::from) };
+    let _resp = with_timeout(navigation, BROWSER_OPERATION_TIMEOUT)
+        .await?
+        .ok_or(Error::Unknown)?;
 
     // let _ = page
     //     .wait_for_selector_builder("html")
@@ -242,9 +244,9 @@ async fn poll(
         _ => (),
     }
 
-    let timeout = std::time::Duration::from_secs(30_u64);
-    let elem = tokio::time::timeout(timeout, fut)
-        .await??
+    let selector_wait = async { fut.await.map_err(Error::from) };
+    let elem = with_timeout(selector_wait, BROWSER_OPERATION_TIMEOUT)
+        .await?
         .ok_or(Error::Unknown)?;
     if exclude_selectors.is_empty() {
         return Ok(normalize_whitespace(elem.inner_text().await?, normalize));
@@ -252,7 +254,7 @@ async fn poll(
 
     let excluded = exclude_selectors
         .iter()
-        .map(|selector| selector.as_str().to_owned())
+        .map(|selector| selector.as_str())
         .collect::<Vec<_>>();
     let content: String = page
         .evaluate_on_selector(
@@ -263,6 +265,20 @@ async fn poll(
         .await?;
 
     Ok(normalize_whitespace(content, normalize))
+}
+
+async fn reset_page(page: &mut Page) {
+    // This prevents the browser from spinning and wasting CPU resources.
+    if let Err(error) = page.goto_builder("about:blank").goto().await {
+        debug!("failed to reset browser page: {error}");
+    }
+}
+
+async fn with_timeout<F, T>(future: F, timeout: Duration) -> Result<T, Error>
+where
+    F: Future<Output = Result<T, Error>>,
+{
+    tokio::time::timeout(timeout, future).await?
 }
 
 #[derive(Debug)]
@@ -286,7 +302,16 @@ impl Display for Error {
         }
     }
 }
-impl std::error::Error for Error {}
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::IOError(error) => Some(error),
+            Self::PlaywrightError(error) => Some(error.as_ref()),
+            Self::Timeout(error) => Some(error),
+            Self::Other(_) | Self::Unknown => None,
+        }
+    }
+}
 impl From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Self {
         Error::IOError(e)
@@ -307,9 +332,21 @@ impl From<tokio::time::error::Elapsed> for Error {
 mod tests {
     use std::{future::pending, time::Duration};
 
-    use tokio::sync::oneshot;
+    use tokio::sync::{oneshot, OnceCell};
 
-    use super::{stream_with_producer, PlaywrightPoller};
+    use super::{get_or_try_init, stream_with_producer, with_timeout, Error, PlaywrightPoller};
+
+    #[test]
+    fn poller_errors_expose_underlying_causes_when_available() {
+        let io_error = Error::IOError(std::io::Error::other("browser process unavailable"));
+
+        assert_eq!(
+            std::error::Error::source(&io_error).unwrap().to_string(),
+            "browser process unavailable"
+        );
+        assert!(std::error::Error::source(&Error::Unknown).is_none());
+        assert!(std::error::Error::source(&Error::Other("internal".into())).is_none());
+    }
 
     struct NotifyOnDrop(Option<oneshot::Sender<()>>);
 
@@ -327,6 +364,42 @@ mod tests {
 
         assert_eq!(poller.pool_size, 1);
         assert!(poller.client_pool.get().is_none());
+    }
+
+    #[tokio::test]
+    async fn failed_pool_initialization_can_be_retried() {
+        let cell = OnceCell::new();
+        let mut attempts = 0;
+        let error: Result<&u8, &str> = get_or_try_init(&cell, || async {
+            attempts += 1;
+            Err("temporary initialization failure")
+        })
+        .await;
+
+        assert_eq!(error.unwrap_err(), "temporary initialization failure");
+        assert!(cell.get().is_none());
+
+        let value = get_or_try_init(&cell, || async {
+            attempts += 1;
+            Ok::<_, &str>(42_u8)
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(*value, 42);
+        assert_eq!(attempts, 2);
+    }
+
+    #[tokio::test]
+    async fn browser_operations_return_timeout_errors_when_they_exceed_the_limit() {
+        let operation = async {
+            let (): () = pending().await;
+            Ok::<(), Error>(())
+        };
+
+        let result = with_timeout(operation, Duration::from_millis(1)).await;
+
+        assert!(matches!(result, Err(Error::Timeout(_))));
     }
 
     #[tokio::test]

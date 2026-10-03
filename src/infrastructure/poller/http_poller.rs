@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
+use std::time::Duration;
 
 use futures_util::{stream, Stream, StreamExt};
 use reqwest::Client;
@@ -7,6 +8,10 @@ use scraper::Html;
 
 use crate::domain::{Config, Id, Poller};
 use crate::infrastructure::poller::normalize_whitespace;
+
+const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const HTTP_RESPONSE_BODY_LIMIT_BYTES: usize = 16 * 1024 * 1024;
+const HTTP_RESPONSE_INITIAL_CAPACITY_BYTES: usize = 64 * 1024;
 
 #[derive(Debug)]
 pub struct HttpPoller {
@@ -45,6 +50,14 @@ impl Poller for HttpPoller {
 }
 
 async fn poll(client: &Client, config: Config) -> Result<String, Error> {
+    poll_with_timeout(client, config, HTTP_REQUEST_TIMEOUT).await
+}
+
+async fn poll_with_timeout(
+    client: &Client,
+    config: Config,
+    timeout: Duration,
+) -> Result<String, Error> {
     let Config {
         url,
         selector,
@@ -53,21 +66,64 @@ async fn poll(client: &Client, config: Config) -> Result<String, Error> {
         ..
     } = config;
 
-    let response = client.get(url.as_str()).send().await?.error_for_status()?;
-    let txt = response.text().await?;
-    let selector = selector.parsed();
-
+    let response = client
+        .get(url.as_str())
+        .timeout(timeout)
+        .send()
+        .await?
+        .error_for_status()?;
+    let txt = response_text(response, HTTP_RESPONSE_BODY_LIMIT_BYTES).await?;
     tokio::task::spawn_blocking(move || {
-        normalize_whitespace(extract_text(&txt, &selector, &exclude_selectors), normalize)
+        normalize_whitespace(
+            extract_text(&txt, selector.parsed(), &exclude_selectors),
+            normalize,
+        )
     })
     .await
     .map_err(Error::HtmlExtraction)
+}
+
+async fn response_text(response: reqwest::Response, max_bytes: usize) -> Result<String, Error> {
+    let length = response.content_length();
+    if length.is_some_and(|length| length > max_bytes as u64) {
+        return Err(Error::ResponseBodyTooLarge { max_bytes });
+    }
+
+    let mut response = response;
+    let mut body = Vec::with_capacity(initial_body_capacity(length, max_bytes));
+    while let Some(chunk) = response.chunk().await? {
+        if body.len().saturating_add(chunk.len()) > max_bytes {
+            return Err(Error::ResponseBodyTooLarge { max_bytes });
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    Ok(decode_response_body(body))
+}
+
+fn initial_body_capacity(content_length: Option<u64>, max_bytes: usize) -> usize {
+    content_length
+        .unwrap_or_default()
+        .min(max_bytes as u64)
+        .min(HTTP_RESPONSE_INITIAL_CAPACITY_BYTES as u64) as usize
+}
+
+fn decode_response_body(mut body: Vec<u8>) -> String {
+    if body.starts_with(&[0xef, 0xbb, 0xbf]) {
+        drop(body.drain(..3));
+    }
+
+    match String::from_utf8(body) {
+        Ok(text) => text,
+        Err(error) => String::from_utf8_lossy(error.as_bytes()).into_owned(),
+    }
 }
 
 #[derive(Debug)]
 pub enum Error {
     Request(reqwest::Error),
     HtmlExtraction(tokio::task::JoinError),
+    ResponseBodyTooLarge { max_bytes: usize },
 }
 
 impl Display for Error {
@@ -75,6 +131,9 @@ impl Display for Error {
         match self {
             Self::Request(error) => write!(f, "HTTP request failed: {error}"),
             Self::HtmlExtraction(error) => write!(f, "HTML extraction task failed: {error}"),
+            Self::ResponseBodyTooLarge { max_bytes } => {
+                write!(f, "HTTP response body exceeded the {max_bytes}-byte limit")
+            }
         }
     }
 }
@@ -84,6 +143,7 @@ impl std::error::Error for Error {
         match self {
             Self::Request(error) => Some(error),
             Self::HtmlExtraction(error) => Some(error),
+            Self::ResponseBodyTooLarge { .. } => None,
         }
     }
 }
@@ -100,8 +160,8 @@ fn extract_text(
     exclude_selectors: &[crate::domain::Selector],
 ) -> String {
     let doc = Html::parse_document(html);
-
     let mut content = String::new();
+    let mut excluded_nodes = HashSet::new();
     for element in doc.select(selector) {
         if exclude_selectors.is_empty() {
             for text in element.text() {
@@ -110,24 +170,46 @@ fn extract_text(
             continue;
         }
 
-        let mut excluded_nodes = HashSet::new();
-        for selector in exclude_selectors {
-            let parsed_selector = selector.parsed();
-            excluded_nodes.extend(element.select(&parsed_selector).map(|element| element.id()));
+        excluded_nodes.clear();
+        for exclude_selector in exclude_selectors {
+            excluded_nodes.extend(
+                element
+                    .select(exclude_selector.parsed())
+                    .map(|element| element.id()),
+            );
         }
 
-        for node in element.descendants() {
-            let Some(text) = node.value().as_text() else {
-                continue;
-            };
-            if node
-                .ancestors()
-                .any(|ancestor| excluded_nodes.contains(&ancestor.id()))
-            {
+        if excluded_nodes.is_empty() {
+            for text in element.text() {
+                append_text(&mut content, text);
+            }
+            continue;
+        }
+
+        let mut next_node = element.first_child();
+        // Defer siblings while descending so the stack stays bounded by tree depth.
+        let mut pending_siblings = Vec::new();
+        while let Some(node) = next_node {
+            // Excluding a node also skips its entire subtree.
+            if excluded_nodes.contains(&node.id()) {
+                next_node = node.next_sibling().or_else(|| pending_siblings.pop());
                 continue;
             }
 
-            append_text(&mut content, text);
+            if let Some(text) = node.value().as_text() {
+                append_text(&mut content, text);
+                next_node = node.next_sibling().or_else(|| pending_siblings.pop());
+                continue;
+            }
+
+            if let Some(child) = node.first_child() {
+                if let Some(sibling) = node.next_sibling() {
+                    pending_siblings.push(sibling);
+                }
+                next_node = Some(child);
+            } else {
+                next_node = node.next_sibling().or_else(|| pending_siblings.pop());
+            }
         }
     }
 
@@ -152,10 +234,20 @@ mod tests {
         Arc,
     };
 
-    use axum::{extract::State, http::StatusCode, routing::get, Router};
+    use axum::{
+        body::{Body, Bytes},
+        extract::State,
+        http::StatusCode,
+        response::Response,
+        routing::get,
+        Router,
+    };
     use futures_util::StreamExt;
 
-    use super::{extract_text, Error, HttpPoller};
+    use super::{
+        decode_response_body, extract_text, initial_body_capacity, poll_with_timeout,
+        response_text, Error, HttpPoller, HTTP_RESPONSE_INITIAL_CAPACITY_BYTES,
+    };
     use crate::domain::{Config, Id, Mode, Poller, Selector, Url};
 
     #[derive(Clone)]
@@ -177,6 +269,43 @@ mod tests {
     }
 
     #[test]
+    fn decodes_response_text_without_a_utf8_bom() {
+        assert_eq!(decode_response_body(b"\xef\xbb\xbfhello".to_vec()), "hello");
+    }
+
+    #[test]
+    fn replaces_invalid_utf8_in_response_text() {
+        assert_eq!(decode_response_body(vec![b'a', 0xff, b'b']), "a�b");
+    }
+
+    #[test]
+    fn caps_initial_body_allocation_even_when_content_length_is_large() {
+        assert_eq!(initial_body_capacity(Some(1_024), 16 * 1024 * 1024), 1_024);
+        assert_eq!(
+            initial_body_capacity(Some(u64::MAX), 16 * 1024 * 1024),
+            HTTP_RESPONSE_INITIAL_CAPACITY_BYTES
+        );
+        assert_eq!(initial_body_capacity(None, 16 * 1024 * 1024), 0);
+    }
+
+    async fn slow_response() -> &'static str {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        "too late"
+    }
+
+    async fn large_response() -> &'static str {
+        "this response body is deliberately larger than the configured test limit"
+    }
+
+    async fn chunked_large_response() -> Response {
+        let chunks = [
+            Ok::<_, std::convert::Infallible>(Bytes::from_static(b"this response ")),
+            Ok(Bytes::from_static(b"is larger than the test limit")),
+        ];
+        Response::new(Body::from_stream(futures_util::stream::iter(chunks)))
+    }
+
+    #[test]
     fn extracts_trimmed_text_from_each_matching_element() {
         let selector = Selector::new("p.selected".to_owned()).unwrap();
         let html = r#"
@@ -188,7 +317,7 @@ mod tests {
 "#;
 
         assert_eq!(
-            extract_text(html, &selector.parsed(), &[]),
+            extract_text(html, selector.parsed(), &[]),
             "first\nsecond\nnested"
         );
     }
@@ -197,7 +326,7 @@ mod tests {
     fn returns_empty_text_when_selector_has_no_matches() {
         let selector = Selector::new(".missing".to_owned()).unwrap();
         assert_eq!(
-            extract_text("<main><p>content</p></main>", &selector.parsed(), &[]),
+            extract_text("<main><p>content</p></main>", selector.parsed(), &[]),
             ""
         );
     }
@@ -209,8 +338,50 @@ mod tests {
         let html = "<main><p>Updated <time class=\"timestamp\">today</time></p><p>Body</p></main>";
 
         assert_eq!(
-            extract_text(html, &selector.parsed(), &[excluded]),
+            extract_text(html, selector.parsed(), &[excluded]),
             "Updated\nBody"
+        );
+    }
+
+    #[test]
+    fn excludes_matching_descendants_from_each_selected_element() {
+        let selector = Selector::new("article".to_owned()).unwrap();
+        let excluded = Selector::new(".timestamp".to_owned()).unwrap();
+        let html = "<article>First <time class=\"timestamp\">today</time></article><article>Second <time class=\"timestamp\">now</time></article>";
+
+        assert_eq!(
+            extract_text(html, selector.parsed(), &[excluded]),
+            "First\nSecond"
+        );
+    }
+
+    #[test]
+    fn skips_nested_excluded_subtrees_and_preserves_document_order() {
+        let selector = Selector::new("article".to_owned()).unwrap();
+        let excluded = [
+            Selector::new(".remove".to_owned()).unwrap(),
+            Selector::new(".remove span".to_owned()).unwrap(),
+        ];
+        let html = "<article>Before <section class=\"remove\">hidden <span>nested</span></section> after <p>end</p></article><article>next</article>";
+
+        assert_eq!(
+            extract_text(html, selector.parsed(), &excluded),
+            "Before\nafter\nend\nnext"
+        );
+    }
+
+    #[test]
+    fn uses_normal_text_traversal_when_exclusions_do_not_match() {
+        let selector = Selector::new("main".to_owned()).unwrap();
+        let excluded = Selector::new(".missing".to_owned()).unwrap();
+
+        assert_eq!(
+            extract_text(
+                "<main>first <span>nested</span> last</main>",
+                selector.parsed(),
+                &[excluded],
+            ),
+            "first\nnested\nlast"
         );
     }
 
@@ -301,6 +472,98 @@ mod tests {
         assert!(matches!(
             error,
             Error::Request(error) if error.status().map(|status| status.as_u16()) == Some(503)
+        ));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn times_out_slow_http_requests() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = Router::new().route("/slow", get(slow_response));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+
+        let config = Config {
+            url: Url::new(format!("http://{address}/slow")).unwrap(),
+            selector: Selector::new("body".to_owned()).unwrap(),
+            mode: Mode::Simple,
+            wait_seconds: None,
+            exclude_selectors: Vec::new(),
+            normalize_whitespace: false,
+            poll_interval_minutes: None,
+        };
+        let error = poll_with_timeout(
+            &reqwest::Client::new(),
+            config,
+            std::time::Duration::from_millis(50),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(error, Error::Request(error) if error.is_timeout()));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn rejects_http_response_bodies_over_the_limit() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = Router::new().route("/large", get(large_response));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+
+        let response = reqwest::get(format!("http://{address}/large"))
+            .await
+            .unwrap();
+        let error = response_text(response, 32).await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::ResponseBodyTooLarge { max_bytes: 32 }
+        ));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn accepts_http_response_body_at_the_limit() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = Router::new().route("/large", get(large_response));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+
+        let response = reqwest::get(format!("http://{address}/large"))
+            .await
+            .unwrap();
+        let expected = "this response body is deliberately larger than the configured test limit";
+        let body = response_text(response, expected.len()).await.unwrap();
+
+        assert_eq!(body, expected);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn enforces_body_limit_when_content_length_is_missing() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = Router::new().route("/chunked", get(chunked_large_response));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+
+        let response = reqwest::get(format!("http://{address}/chunked"))
+            .await
+            .unwrap();
+        assert_eq!(response.content_length(), None);
+        let error = response_text(response, 32).await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::ResponseBodyTooLarge { max_bytes: 32 }
         ));
         server.abort();
     }

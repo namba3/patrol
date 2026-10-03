@@ -11,16 +11,32 @@ impl Timestamp {
         Self(chrono::Utc::now())
     }
     pub fn from_unix_secs(secs: i64) -> Self {
-        Self::from_unix_nanos(secs * 1_000_000_000)
+        Self::try_from_unix_secs(secs).expect("unix seconds are outside the supported range")
     }
+
+    pub fn try_from_unix_secs(secs: i64) -> Option<Self> {
+        DT::from_timestamp(secs, 0).map(Self)
+    }
+
     pub fn from_unix_millis(millis: i64) -> Self {
-        Self::from_unix_nanos(millis * 1_000_000)
+        Self::try_from_unix_millis(millis)
+            .expect("unix milliseconds are outside the supported range")
     }
+
+    pub fn try_from_unix_millis(millis: i64) -> Option<Self> {
+        let secs = millis.div_euclid(1_000);
+        let subsec_nanos = millis.rem_euclid(1_000) as u32 * 1_000_000;
+        DT::from_timestamp(secs, subsec_nanos).map(Self)
+    }
+
     pub fn from_unix_nanos(nanos: i64) -> Self {
+        Self::try_from_unix_nanos(nanos).expect("unix nanoseconds are outside the supported range")
+    }
+
+    pub fn try_from_unix_nanos(nanos: i64) -> Option<Self> {
         let secs = nanos.div_euclid(1_000_000_000);
         let subsec_nanos = nanos.rem_euclid(1_000_000_000) as u32;
-        let dt = DT::from_timestamp(secs, subsec_nanos).unwrap();
-        Self(dt)
+        DT::from_timestamp(secs, subsec_nanos).map(Self)
     }
 
     pub fn unix_secs(&self) -> i64 {
@@ -29,10 +45,15 @@ impl Timestamp {
     pub fn unix_millis(&self) -> i64 {
         self.0.timestamp_millis()
     }
+    /// Returns Unix nanoseconds, clamping timestamps outside the `i64` nanosecond range.
     pub fn unix_nanos(&self) -> i64 {
-        self.0
-            .timestamp_nanos_opt()
-            .unwrap_or_else(|| self.0.timestamp_millis() * 1000)
+        self.0.timestamp_nanos_opt().unwrap_or_else(|| {
+            if self.0.timestamp() < 0 {
+                i64::MIN
+            } else {
+                i64::MAX
+            }
+        })
     }
 }
 
@@ -113,6 +134,36 @@ mod tests {
 
         assert_eq!(timestamp.unix_secs(), -1);
         assert_eq!(timestamp.unix_nanos(), -1);
+        assert_eq!(Timestamp::from_unix_millis(-1).unix_nanos(), -1_000_000);
+    }
+
+    #[test]
+    fn unix_seconds_and_millis_do_not_overflow_via_nanos() {
+        let seconds = Timestamp::from_unix_secs(10_000_000_000);
+        assert_eq!(seconds.unix_secs(), 10_000_000_000);
+        assert_eq!(seconds.unix_nanos(), i64::MAX);
+
+        let millis = Timestamp::from_unix_millis(10_000_000_000_000);
+        assert_eq!(millis.unix_millis(), 10_000_000_000_000);
+        assert_eq!(millis.unix_nanos(), i64::MAX);
+    }
+
+    #[test]
+    fn checked_unix_constructors_reject_dates_outside_chrono_range() {
+        assert!(Timestamp::try_from_unix_secs(i64::MAX).is_none());
+        assert!(Timestamp::try_from_unix_millis(i64::MAX).is_none());
+        assert_eq!(
+            Timestamp::try_from_unix_nanos(i64::MAX)
+                .unwrap()
+                .unix_nanos(),
+            i64::MAX
+        );
+        assert_eq!(
+            Timestamp::try_from_unix_nanos(i64::MIN)
+                .unwrap()
+                .unix_nanos(),
+            i64::MIN
+        );
     }
 
     #[test]

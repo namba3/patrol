@@ -100,10 +100,19 @@
       const historyOlder = document.querySelector("#history-older");
       const historyRetry = document.querySelector("#history-retry");
       const historyPageSize = 50;
+      const RECONNECT_INITIAL_DELAY_MS = 1000;
+      const RECONNECT_MAX_DELAY_MS = 30000;
       let currentHistoryId;
       let currentHistoryOffset = 0;
+      let historyRequestId = 0;
       let eventSocket;
       let reconnectTimer;
+      let reconnectDelayMs = RECONNECT_INITIAL_DELAY_MS;
+      let eventSocketConnected = false;
+      let statusApiError;
+      let statusRefreshInFlight = false;
+      let statusRefreshPending = false;
+      let lastStatusSnapshot;
 
       function cell(value, className) {
         const element = document.createElement("td");
@@ -114,6 +123,16 @@
 
       function formatTime(unixMillis) {
         return unixMillis == null ? "—" : new Date(unixMillis).toLocaleString();
+      }
+
+      function updateConnectionStatus() {
+        if (statusApiError) {
+          connection.textContent = `状態を取得できません: ${statusApiError}`;
+        } else if (eventSocketConnected) {
+          connection.textContent = "状態APIとWebSocketに接続中";
+        } else {
+          connection.textContent = "状態APIに接続中 (WebSocket再接続中)";
+        }
       }
 
       function renderDiff(before, after) {
@@ -168,6 +187,7 @@
       }
 
       async function showHistory(id, offset = 0) {
+        const requestId = ++historyRequestId;
         currentHistoryId = id;
         currentHistoryOffset = offset;
         historyEntries.replaceChildren();
@@ -185,6 +205,8 @@
           const response = await fetch(`/api/v1/history?${query}`, { cache: "no-store" });
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
           const page = await response.json();
+          if (requestId !== historyRequestId) return;
+          currentHistoryOffset = page.offset;
           historyMessage.textContent = page.total
             ? `${id} の変更履歴（${page.total}件中 ${page.offset + 1}〜${page.offset + page.entries.length}件）`
             : "変更履歴はありません。";
@@ -220,10 +242,15 @@
             historyEntries.append(section);
           }
         } catch (error) {
+          if (requestId !== historyRequestId) return;
           historyMessage.textContent = `履歴を取得できません: ${error.message}`;
           historyRetry.hidden = false;
         }
       }
+
+      historyDialog.addEventListener("close", () => {
+        historyRequestId++;
+      });
 
       historyRetry.addEventListener("click", () => {
         showHistory(currentHistoryId, currentHistoryOffset);
@@ -236,10 +263,22 @@
       });
 
       async function refreshStatus() {
+        if (statusRefreshInFlight) {
+          statusRefreshPending = true;
+          return;
+        }
+        statusRefreshInFlight = true;
         try {
           const response = await fetch("/api/v1/status", { cache: "no-store" });
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
           const statusList = await response.json();
+          statusApiError = undefined;
+          const statusSnapshot = JSON.stringify(statusList);
+          if (statusSnapshot === lastStatusSnapshot) {
+            updated.textContent = `更新: ${new Date().toLocaleTimeString()} ・ ${statusList.length} 件`;
+            updateConnectionStatus();
+            return;
+          }
           const selectedId = idFilter.value;
           const allOption = document.createElement("option");
           allOption.value = "";
@@ -280,9 +319,17 @@
             rows.append(row);
           }
           updated.textContent = `更新: ${new Date().toLocaleTimeString()} ・ ${statusList.length} 件`;
-          connection.textContent = "状態APIに接続中";
+          updateConnectionStatus();
+          lastStatusSnapshot = statusSnapshot;
         } catch (error) {
-          connection.textContent = `状態を取得できません: ${error.message}`;
+          statusApiError = error.message;
+          updateConnectionStatus();
+        } finally {
+          statusRefreshInFlight = false;
+          if (statusRefreshPending) {
+            statusRefreshPending = false;
+            refreshStatus();
+          }
         }
       }
 
@@ -294,8 +341,14 @@
         if (eventFilter.value) endpoint.searchParams.set("event", eventFilter.value);
         const socket = new WebSocket(endpoint.toString());
         eventSocket = socket;
-        socket.onopen = () => { connection.textContent = "状態APIとWebSocketに接続中"; };
+        socket.onopen = () => {
+          if (eventSocket !== socket) return;
+          eventSocketConnected = true;
+          reconnectDelayMs = RECONNECT_INITIAL_DELAY_MS;
+          updateConnectionStatus();
+        };
         socket.onmessage = (message) => {
+          if (eventSocket !== socket) return;
           let event;
           try { event = JSON.parse(message.data); } catch { return; }
           const item = document.createElement("li");
@@ -306,14 +359,20 @@
         };
         socket.onclose = () => {
           if (eventSocket !== socket) return;
-          connection.textContent = "WebSocketを再接続しています…";
-          reconnectTimer = setTimeout(connectEvents, 3000);
+          eventSocketConnected = false;
+          updateConnectionStatus();
+          const delay = reconnectDelayMs;
+          reconnectDelayMs = Math.min(reconnectDelayMs * 2, RECONNECT_MAX_DELAY_MS);
+          reconnectTimer = setTimeout(connectEvents, delay);
         };
         socket.onerror = () => socket.close();
       }
 
       function restartEvents() {
         clearTimeout(reconnectTimer);
+        reconnectDelayMs = RECONNECT_INITIAL_DELAY_MS;
+        eventSocketConnected = false;
+        updateConnectionStatus();
         events.replaceChildren();
         if (eventSocket) {
           eventSocket.onclose = null;

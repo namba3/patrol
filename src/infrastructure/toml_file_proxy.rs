@@ -116,7 +116,16 @@ impl Display for Error {
         }
     }
 }
-impl std::error::Error for Error {}
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::IoError(error) => Some(error),
+            Self::TomlError(error) => Some(error),
+            Self::TomlSerializeError(error) => Some(error),
+            Self::CacheEmpty => None,
+        }
+    }
+}
 impl From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Self {
         Error::IoError(e)
@@ -138,6 +147,17 @@ mod tests {
     use std::{collections::HashMap, path::PathBuf};
 
     use super::{Error, TomlFileProxy};
+
+    #[test]
+    fn proxy_errors_expose_their_underlying_cause() {
+        let io_error = Error::IoError(std::io::Error::other("disk unavailable"));
+
+        assert_eq!(
+            std::error::Error::source(&io_error).unwrap().to_string(),
+            "disk unavailable"
+        );
+        assert!(std::error::Error::source(&Error::CacheEmpty).is_none());
+    }
 
     struct FailsToSerialize;
 
@@ -212,6 +232,35 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), previous_content);
         drop(proxy);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_atomic_replace_removes_temporary_file() {
+        let path = temp_toml_path();
+        let mut proxy = TomlFileProxy::<HashMap<String, String>>::new(path.to_str().unwrap())
+            .await
+            .unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        proxy.update_cache(HashMap::from([("page".to_owned(), "content".to_owned())]));
+
+        let result = proxy.save().await;
+
+        assert!(matches!(result, Err(Error::IoError(_))));
+        let temporary_prefix = format!(".{}.", path.file_name().unwrap().to_string_lossy());
+        let temporary_files = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                name.starts_with(&temporary_prefix) && name.ends_with(".tmp")
+            })
+            .count();
+        assert_eq!(temporary_files, 0);
+
+        drop(proxy);
+        std::fs::remove_dir(path).unwrap();
     }
 
     #[tokio::test]

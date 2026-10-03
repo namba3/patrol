@@ -32,14 +32,15 @@ impl TomlDataRepository {
         }
     }
 
-    // Updates the inner hashmap and returns the old element.
-    fn update_map(&mut self, id: Id, hash: Hash, now: Timestamp) -> RestoreInfo {
+    // Updates the cached entry and returns its prior value and hash-change status.
+    fn update_map(&mut self, id: Id, hash: Hash, now: Timestamp) -> (RestoreInfo, bool) {
         let cache = self.proxy.get_cache_mut().unwrap();
         let entry = cache.entry(id.clone());
         let mut data = match &entry {
             std::collections::hash_map::Entry::Occupied(entry) => entry.get().clone(),
             std::collections::hash_map::Entry::Vacant(_) => Data::default(),
         };
+        let changed = data.hash.as_ref() != Some(&hash);
 
         data.last_checked = Some(now);
         data.last_attempted = Some(now);
@@ -47,7 +48,7 @@ impl TomlDataRepository {
         data.consecutive_failures = 0;
         data.last_error = None;
 
-        if data.hash.as_ref() != Some(&hash) {
+        if changed {
             data.last_updated = now.into();
             info!(
                 "[{id}]: {}",
@@ -68,7 +69,7 @@ impl TomlDataRepository {
                 None
             }
         };
-        RestoreInfo { id, data: old_data }
+        (RestoreInfo { id, data: old_data }, changed)
     }
 
     fn delete_map(&mut self, id: Id) -> RestoreInfo {
@@ -182,36 +183,29 @@ impl DataRepository for TomlDataRepository {
         let mut restore_infos = Vec::with_capacity(outcome_count);
 
         for (id, hash) in hashes {
-            let restore_info = self.update_map(id, hash, now);
-            let old_hash = restore_info
-                .data
-                .as_ref()
-                .and_then(|data| data.hash.as_ref());
-            let new_hash = self
-                .proxy
-                .get_cache()
-                .unwrap()
-                .get(&restore_info.id)
-                .and_then(|data| data.hash.as_ref());
-            let _ = changed_at.insert(
-                restore_info.id.clone(),
-                (old_hash != new_hash).then_some(now),
-            );
+            let (restore_info, changed) = self.update_map(id, hash, now);
+            let _ = changed_at.insert(restore_info.id.clone(), changed.then_some(now));
             if seen.insert(restore_info.id.clone()) {
                 restore_infos.push(restore_info);
             }
         }
 
         for id in empty_successes {
+            let cache = self.proxy.get_cache_mut().unwrap();
+            let entry = cache.entry(id.clone());
             let restore_info = if seen.insert(id.clone()) {
+                let data = match &entry {
+                    std::collections::hash_map::Entry::Occupied(entry) => Some(entry.get().clone()),
+                    std::collections::hash_map::Entry::Vacant(_) => None,
+                };
                 Some(RestoreInfo {
                     id: id.clone(),
-                    data: self.proxy.get_cache().unwrap().get(&id).cloned(),
+                    data,
                 })
             } else {
                 None
             };
-            let data = self.proxy.get_cache_mut().unwrap().entry(id).or_default();
+            let data = entry.or_default();
             data.last_attempted = Some(now);
             data.last_success = Some(now);
             data.consecutive_failures = 0;
@@ -222,20 +216,21 @@ impl DataRepository for TomlDataRepository {
         }
 
         for (id, error) in failures {
+            let cache = self.proxy.get_cache_mut().unwrap();
+            let entry = cache.entry(id.clone());
             let restore_info = if seen.insert(id.clone()) {
+                let data = match &entry {
+                    std::collections::hash_map::Entry::Occupied(entry) => Some(entry.get().clone()),
+                    std::collections::hash_map::Entry::Vacant(_) => None,
+                };
                 Some(RestoreInfo {
                     id: id.clone(),
-                    data: self.proxy.get_cache().unwrap().get(&id).cloned(),
+                    data,
                 })
             } else {
                 None
             };
-            let data = self
-                .proxy
-                .get_cache_mut()
-                .unwrap()
-                .entry(id.clone())
-                .or_default();
+            let data = entry.or_default();
             data.last_attempted = Some(now);
             data.consecutive_failures = data.consecutive_failures.saturating_add(1);
             data.last_error = Some(error);

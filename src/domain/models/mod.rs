@@ -10,6 +10,8 @@ pub use self::selector::Selector;
 pub use self::timestamp::{Duration, Timestamp};
 pub use self::url::Url;
 
+pub(crate) const CHANGE_HISTORY_CONTENT_LIMIT_BYTES: usize = 4 * 1024;
+
 use serde_derive::{Deserialize, Serialize};
 
 #[derive(Deserialize, Serialize, Debug, Clone)]

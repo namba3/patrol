@@ -64,6 +64,7 @@ impl Display for UrlParseError {
         f.write_str("failed to parse the URL.")
     }
 }
+impl std::error::Error for UrlParseError {}
 
 #[cfg(test)]
 mod tests {

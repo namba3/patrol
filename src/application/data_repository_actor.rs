@@ -317,7 +317,14 @@ impl<E: std::error::Error> Display for Error<E> {
         }
     }
 }
-impl<E: std::error::Error> std::error::Error for Error<E> {}
+impl<E: std::error::Error> std::error::Error for Error<E> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Error::ActorMessageError(error) => Some(error),
+            Error::DataRepositoryError(_) => None,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActorMessageError {
@@ -344,6 +351,17 @@ mod tests {
 
     use super::DataRepositoryActor;
     use crate::domain::{Data, DataRepository, Hash, Id, Timestamp};
+
+    #[test]
+    fn actor_message_errors_are_exposed_as_sources() {
+        let error =
+            super::Error::<std::io::Error>::ActorMessageError(super::ActorMessageError::SendError);
+
+        assert_eq!(
+            std::error::Error::source(&error).unwrap().to_string(),
+            "failed to send the message to the actor."
+        );
+    }
 
     #[derive(Default)]
     struct InMemoryRepository {

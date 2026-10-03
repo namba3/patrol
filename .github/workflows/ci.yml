@@ -1,0 +1,38 @@
+name: Rust CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install nightly toolchain
+        run: rustup toolchain install nightly --profile minimal --component rustfmt --component clippy
+
+      - name: Cache Cargo dependencies and build output
+        uses: Swatinem/rust-cache@v2.9.2
+
+      - name: Check formatting
+        run: cargo +nightly fmt --check
+
+      - name: Run Clippy
+        run: cargo +nightly clippy --locked --all-targets --features playwright/only-for-docs-rs -- -D warnings
+
+      - name: Run tests
+        run: cargo +nightly test --locked --features playwright/only-for-docs-rs
+
+      - name: Build release binary
+        run: cargo +nightly build --locked --release --features playwright/only-for-docs-rs

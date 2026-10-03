@@ -54,8 +54,15 @@ where
     }
 
     async fn poll_multiple(&mut self, configs: HashMap<Id, Config>) -> Self::Stream {
-        let mut full_mode_configs = HashMap::new();
-        let mut simple_mode_configs = HashMap::new();
+        let (full_mode_count, simple_mode_count) =
+            configs
+                .values()
+                .fold((0, 0), |(full, simple), config| match config.mode {
+                    Mode::Full => (full + 1, simple),
+                    Mode::Simple => (full, simple + 1),
+                });
+        let mut full_mode_configs = HashMap::with_capacity(full_mode_count);
+        let mut simple_mode_configs = HashMap::with_capacity(simple_mode_count);
 
         for (id, config) in configs.into_iter() {
             match config.mode {
@@ -108,11 +115,11 @@ where
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Error::FullModePollerError(e) => {
-                f.write_fmt(format_args!("failed to poll the content: {e}"))
+            Error::FullModePollerError(error) => {
+                f.write_fmt(format_args!("full-mode poller error: {error}"))
             }
-            Error::SimpleModePollerError(e) => {
-                f.write_fmt(format_args!("failed to poll the content: {e}"))
+            Error::SimpleModePollerError(error) => {
+                f.write_fmt(format_args!("simple-mode poller error: {error}"))
             }
         }
     }
@@ -286,6 +293,14 @@ mod tests {
             &results[&simple_id],
             Err(Error::SimpleModePollerError(_))
         ));
+        assert_eq!(
+            results[&full_id].as_ref().unwrap_err().to_string(),
+            "full-mode poller error: test poller error"
+        );
+        assert_eq!(
+            results[&simple_id].as_ref().unwrap_err().to_string(),
+            "simple-mode poller error: test poller error"
+        );
     }
 
     #[tokio::test]

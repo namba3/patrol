@@ -1,10 +1,10 @@
 use serde::{Deserialize, Serialize};
 
-use crate::infrastructure::TomlFileProxy;
+use crate::{domain::CHANGE_HISTORY_CONTENT_LIMIT_BYTES, infrastructure::TomlFileProxy};
 
 pub const HISTORY_LIMIT: usize = 100;
 pub const MAX_HISTORY_LIMIT: usize = 1_000;
-pub const CONTENT_LIMIT_BYTES: usize = 4 * 1024;
+pub const CONTENT_LIMIT_BYTES: usize = CHANGE_HISTORY_CONTENT_LIMIT_BYTES;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChangeHistoryEntry {
@@ -38,17 +38,12 @@ impl TomlChangeHistoryRepository {
     ) -> Result<Self, crate::infrastructure::toml_file_proxy::Error> {
         let history_limit = history_limit.clamp(1, MAX_HISTORY_LIMIT);
         let mut proxy = TomlFileProxy::<ChangeHistoryDocument>::new(path).await?;
-        let entries = proxy.get_cache_or_load().await?.entries.clone();
-        proxy.update_cache(ChangeHistoryDocument {
-            entries: entries
-                .into_iter()
-                .rev()
-                .take(history_limit)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect(),
-        });
+        proxy.get_cache_or_load().await?;
+        let entries = &mut proxy.get_cache_mut().unwrap().entries;
+        let entries_to_remove = entries.len().saturating_sub(history_limit);
+        if entries_to_remove > 0 {
+            entries.drain(..entries_to_remove);
+        }
         Ok(Self {
             proxy,
             history_limit,
@@ -76,16 +71,21 @@ impl TomlChangeHistoryRepository {
         &mut self,
         changes: impl IntoIterator<Item = (String, i64, String, bool)>,
     ) -> Result<(), crate::infrastructure::toml_file_proxy::Error> {
-        let mut entries = self.entries().to_vec();
-        let mut latest_entry_by_id = entries
+        let mut changes = changes.into_iter().peekable();
+        if changes.peek().is_none() {
+            return Ok(());
+        }
+
+        let original_len = self.entries().len();
+        let mut latest_entry_by_id = self
+            .entries()
             .iter()
             .enumerate()
             .map(|(index, entry)| (entry.id.clone(), index))
             .collect::<std::collections::HashMap<_, _>>();
-        let mut changed = false;
         for (id, timestamp_unix_ms, content, already_truncated) in changes {
             let previous = latest_entry_by_id.get(&id).map(|index| {
-                let entry = &entries[*index];
+                let entry = &self.entries()[*index];
                 (entry.content.clone(), entry.content_truncated)
             });
             let (content, content_truncated) = bounded_content(content);
@@ -94,6 +94,11 @@ impl TomlChangeHistoryRepository {
                 Some((content, truncated)) => (Some(content), truncated),
                 None => (None, false),
             };
+            let entries = &mut self
+                .proxy
+                .get_cache_mut()
+                .ok_or(crate::infrastructure::toml_file_proxy::Error::CacheEmpty)?
+                .entries;
             latest_entry_by_id.insert(id.clone(), entries.len());
             entries.push(ChangeHistoryEntry {
                 id,
@@ -103,22 +108,29 @@ impl TomlChangeHistoryRepository {
                 content,
                 content_truncated,
             });
-            changed = true;
         }
-        if !changed {
-            return Ok(());
-        }
-        if entries.len() > self.history_limit {
-            entries.drain(..entries.len() - self.history_limit);
-        }
-        let new_document = ChangeHistoryDocument { entries };
-        let previous_document = match self.proxy.get_cache_mut() {
-            Some(cache) => std::mem::replace(cache, new_document),
-            None => return Err(crate::infrastructure::toml_file_proxy::Error::CacheEmpty),
+        let removed_entries = {
+            let entries = &mut self
+                .proxy
+                .get_cache_mut()
+                .ok_or(crate::infrastructure::toml_file_proxy::Error::CacheEmpty)?
+                .entries;
+            let entries_to_remove = entries.len().saturating_sub(self.history_limit);
+            entries.drain(..entries_to_remove).collect::<Vec<_>>()
         };
         let result = self.proxy.save().await;
         if result.is_err() {
-            self.proxy.update_cache(previous_document);
+            let entries = &mut self
+                .proxy
+                .get_cache_mut()
+                .ok_or(crate::infrastructure::toml_file_proxy::Error::CacheEmpty)?
+                .entries;
+            let removed_original_entries = removed_entries
+                .into_iter()
+                .take(original_len)
+                .collect::<Vec<_>>();
+            entries.truncate(original_len - removed_original_entries.len());
+            entries.splice(0..0, removed_original_entries);
         }
         result
     }
@@ -267,6 +279,36 @@ mod tests {
         assert_eq!(repository.entries().len(), 1);
         assert_eq!(repository.entries()[0].id, "saved");
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_save_restores_entries_removed_by_history_limit() {
+        let path = temp_path();
+        let mut repository = TomlChangeHistoryRepository::with_limit(&path, 2)
+            .await
+            .unwrap();
+        repository
+            .record_batch(vec![
+                ("first".into(), 1, "one".into(), false),
+                ("second".into(), 2, "two".into(), false),
+            ])
+            .await
+            .unwrap();
+        let before = repository.entries().to_vec();
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let result = repository
+            .record_batch(vec![
+                ("third".into(), 3, "three".into(), false),
+                ("fourth".into(), 4, "four".into(), false),
+                ("fifth".into(), 5, "five".into(), false),
+            ])
+            .await;
+
+        assert!(result.is_err());
+        assert_eq!(repository.entries(), before);
+        std::fs::remove_dir(&path).unwrap();
     }
 
     #[tokio::test]

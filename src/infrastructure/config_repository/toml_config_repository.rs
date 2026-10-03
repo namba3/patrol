@@ -175,7 +175,15 @@ impl Display for Error {
         }
     }
 }
-impl std::error::Error for Error {}
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::TomlProxyError(error) => Some(error),
+            Self::UrlParseError(error) => Some(error),
+            Self::SelectorParseError(error) => Some(error),
+        }
+    }
+}
 impl From<TomlProxyError> for Error {
     fn from(e: TomlProxyError) -> Self {
         Error::TomlProxyError(e)
@@ -221,6 +229,34 @@ mod tests {
         assert_eq!(
             Error::SelectorParseError(crate::domain::selector::SelectorParseError).to_string(),
             "selector parse error: failed to parse the selector."
+        );
+    }
+
+    #[test]
+    fn repository_errors_expose_their_underlying_cause() {
+        let error = Error::TomlProxyError(crate::infrastructure::toml_file_proxy::Error::IoError(
+            std::io::Error::other("disk unavailable"),
+        ));
+
+        let source = std::error::Error::source(&error).unwrap();
+        assert_eq!(source.to_string(), "IO error: disk unavailable");
+        assert_eq!(
+            std::error::Error::source(source).unwrap().to_string(),
+            "disk unavailable"
+        );
+
+        let url_error = Error::UrlParseError(crate::domain::url::UrlParseError);
+        assert_eq!(
+            std::error::Error::source(&url_error).unwrap().to_string(),
+            "failed to parse the URL."
+        );
+
+        let selector_error = Error::SelectorParseError(crate::domain::selector::SelectorParseError);
+        assert_eq!(
+            std::error::Error::source(&selector_error)
+                .unwrap()
+                .to_string(),
+            "failed to parse the selector."
         );
     }
 

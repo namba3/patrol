@@ -18,19 +18,24 @@
 
 - `Poller::poll_multiple`は`(Id, Result<String, Error>)`のstreamを返します。完了順は入力順とは限りません。
 - `Config`の`mode`は`Simple`か`Full`です。TOMLでは小文字表記を使い、省略時の既定値は`Full`です。
+- `Timestamp::try_from_unix_secs`、`try_from_unix_millis`、`try_from_unix_nanos`は表現範囲外の値に`None`を返します。外部入力など範囲が保証されない値にはchecked形式を使います。`unix_nanos`は`i64`のナノ秒範囲外を上下限へ丸めます。
 - `DataRepository::update`は内容が変わった場合に更新時刻を返し、同じ内容なら`None`を返します。
 - `DataRepository::update_multiple`は複数のハッシュをまとめて保存します。変更時刻が必要な呼び出し側は`update_multiple_with_timestamps`を使います。既定実装は既存のtrait実装との互換性を保つため、更新前後の読み取りから変更時刻を求めます。TOML実装はまとめて保存し、ファイル書き込みを1回にします。
 - `DataRepository::record_failure`は対象の連続失敗数と直近エラーを保存します。複数の失敗を処理する場合は`record_failures`を使います。成功時の`update`または`record_success`で失敗状態を消去します。
 - `Config`は任意の`exclude_selectors`、`normalize_whitespace`、`poll_interval_minutes`を持ちます。TOMLでは省略可能で、除外・正規化を無効、巡回間隔を全体設定にする既定値を保ちます。
 - `App`は空の取得内容を保存しません。抽出結果の正規化を変える場合は、既存の記録との比較結果にも影響することを考慮します。
 - `App`は各巡回結果を`record_poll_results`でまとめて保存し、保存成功後に変更・失敗・復旧イベントを送ります。既定実装は既存の単件APIへ委譲し、TOML実装では巡回あたり最大1回のファイル書き込みです。保存失敗時はそれらのイベントを送りません。
+- `App`は失敗した対象を同一サイクル内で最大3回試し、再試行の間に250ms、500msの指数バックオフを置きます。待ち時間も巡回締切に含め、締切を過ぎる場合は次の取得を開始しません。
 - 空の取得結果は成功状態だけを記録し、`hash`と`last_checked`は更新しません。
 - `TomlFileProxy::save`は同じディレクトリの一時ファイルに書いてから置き換えます。シリアライズや一時ファイルへの書き込みが失敗しても、既存ファイルを途中まで切り詰めません。
 - アプリケーションからWebSocket中継タスクへの通知キューは容量128のbounded channelです。配信が遅れた場合は巡回処理が送信を待ち、キューが無制限に増えるのを防ぎます。
 - WebSocketの`id`と`event`フィルターは各接続内で適用します。フィルターなしの既存接続は全イベントを受け取り、フィルター指定はbroadcast全体の配信には影響しません。
 - `DataRepositoryActor`の要求キューは容量64のbounded channelです。キューが埋まると呼び出し側が送信を待ちます。このactorは現在の`main.rs`の起動経路では使用されていません。
-- `PlaywrightPoller`の結果キュー容量はブラウザーページ数と同じです。結果の消費が遅いときは、並列巡回を続けずにキューの空きを待ちます。呼び出し側が結果ストリームを破棄した場合は、生成タスクも停止します。
+- `PlaywrightPoller`のページ遷移とセレクター待機には各30秒のタイムアウトがあります。結果キュー容量はブラウザーページ数と同じです。結果の消費が遅いときは、並列巡回を続けずにキューの空きを待ちます。呼び出し側が結果ストリームを破棄した場合は、生成タスクも停止します。
+- `HttpPoller`はHTTP応答本文を最大16 MiBまで読み込み、上限を超えた場合は本文の抽出を開始せずに失敗として返します。本文はchunk単位で読み、Content-Lengthが上限を超える場合は先に拒否します。
 - `App::run_with_status`は巡回後の状態一覧を`watch`で公開します。HTTP status APIとWebUIはこのスナップショットを参照します。
+- `App::run_with_history_and_shutdown`は終了要求を次の巡回開始前に確認します。巡回中に要求された場合は現在の結果保存まで完了し、その後は新しい巡回を開始しません。起動経路では通知中継タスクと履歴書き込みタスクの終了も待ちます。
+- 起動経路は`q`、標準入力EOF、Ctrl-Cを終了要求として扱い、Unix系OSではSIGTERMも捕捉します。HTTP・WebSocketの待受アドレスは`--web-listen`で指定し、`/healthz`はサーバー応答性のみを返します。
 - 変更本文は`App::run_with_history`の任意チャンネルで巡回単位にまとめて保存層へ渡します。履歴は`TomlChangeHistoryRepository`が`history.toml`に別保存し、巡回中に複数の本文が変わってもTOMLへの書き込みは1回です。全体で既定100件（1〜1000件に設定可能）、本文ごとに4 KiBに制限します。本文を追加する場合は、履歴書き込みがAPIスナップショットに反映される流れと切り詰め表示も保ってください。
 - 変更履歴を有効にした起動経路では、履歴ファイルの保存とAPIスナップショット更新が完了した後に変更通知を送ります。保存は最大3回試行し、すべて失敗した場合も変更通知自体は送ってエラーをログに残します。履歴リポジトリは書き込み失敗時にメモリー上のキャッシュを巻き戻します。
 - 本文のハッシュは取得テキスト全体から計算します。履歴用のコピーだけは変更判定より前にUTF-8境界で4 KiBへ切り詰め、`content_truncated`で記録します。巡回中に取得本文すべての複製を保持しないよう、この上限を保ってください。
@@ -48,6 +53,25 @@ cargo +nightly run -- --config-path ./config.example.toml --data-path ./data.tom
 ```
 
 `config.example.toml`のURLとセレクターはサンプル値です。実際の対象サイトでの抽出結果やブラウザー動作を確認する場合は、用途に合う設定に置き換えてください。
+
+## テストと書式チェック
+
+通常のテストとRustコードの書式チェックは次のコマンドで実行します。
+
+```sh
+cargo +nightly test
+cargo +nightly fmt --check
+```
+
+Playwright依存crateはビルド時にブラウザードライバーを取得します。ブラウザーを起動しないユニットテストだけを実行する場合は、次のfeatureを指定するとドライバー取得を省略できます。
+
+```sh
+cargo +nightly test --features playwright/only-for-docs-rs
+```
+
+このfeatureを使った実行はRust側のユニットテスト用です。Chromiumの起動、ページ遷移、実サイトからの抽出動作は検証しません。
+
+GitHub Actionsの`.github/workflows/ci.yml`は、pushとpull requestで書式チェック、Clippy、テスト、releaseビルドを実行します。CIも同じdocs-rs featureを使うため、実ブラウザーの起動は確認しません。
 
 ## 資料の更新
 

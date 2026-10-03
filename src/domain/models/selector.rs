@@ -25,8 +25,8 @@ impl Selector {
         &self.source
     }
 
-    pub(crate) fn parsed(&self) -> Arc<scraper::Selector> {
-        self.parsed.clone()
+    pub(crate) fn parsed(&self) -> &scraper::Selector {
+        &self.parsed
     }
 }
 impl From<Selector> for String {
@@ -109,11 +109,10 @@ impl Display for SelectorParseError {
         f.write_str("failed to parse the selector.")
     }
 }
+impl std::error::Error for SelectorParseError {}
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use super::Selector;
 
     #[test]
@@ -148,6 +147,6 @@ mod tests {
         let selector = Selector::new("main article h1.title".to_owned()).unwrap();
         let clone = selector.clone();
 
-        assert!(Arc::ptr_eq(&selector.parsed(), &clone.parsed()));
+        assert!(std::ptr::eq(selector.parsed(), clone.parsed()));
     }
 }

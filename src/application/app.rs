@@ -1,13 +1,25 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    borrow::Cow,
+    collections::{HashMap, HashSet},
+};
 
 use futures_util::StreamExt;
 use log::{debug, info, warn};
 use prettytable::{color, row, Attr, Cell, Row, Table};
 use tokio::sync::{mpsc, oneshot, watch};
 
-use crate::domain::{self, Duration, Timestamp};
+use crate::domain::{
+    self, Duration, Timestamp, CHANGE_HISTORY_CONTENT_LIMIT_BYTES as HISTORY_CONTENT_LIMIT_BYTES,
+};
 
-const HISTORY_CONTENT_LIMIT_BYTES: usize = 4 * 1024;
+const RETRY_BACKOFF_BASE: std::time::Duration = std::time::Duration::from_millis(250);
+
+fn retry_backoff(retry_number: u8) -> std::time::Duration {
+    let multiplier = 1_u32
+        .checked_shl(u32::from(retry_number.saturating_sub(1)))
+        .unwrap_or(u32::MAX);
+    RETRY_BACKOFF_BASE.saturating_mul(multiplier)
+}
 
 pub struct App<ConfigRepository, DataRepository, Poller> {
     config_repo: ConfigRepository,
@@ -74,6 +86,105 @@ pub struct DocStatus {
     pub last_error: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PollStatus {
+    Failed(u32),
+    Ok,
+    NotChecked,
+}
+
+impl PollStatus {
+    fn from_data(data: Option<&domain::Data>) -> Self {
+        match data {
+            Some(data) if data.consecutive_failures > 0 => Self::Failed(data.consecutive_failures),
+            Some(data) if data.last_success.is_some() => Self::Ok,
+            _ => Self::NotChecked,
+        }
+    }
+
+    fn api_label(self) -> &'static str {
+        match self {
+            Self::Failed(_) => "failed",
+            Self::Ok => "ok",
+            Self::NotChecked => "not_checked",
+        }
+    }
+
+    fn terminal_label(self) -> Cow<'static, str> {
+        match self {
+            Self::Failed(count) => Cow::Owned(format!("failed ({count})")),
+            Self::Ok => Cow::Borrowed("ok"),
+            Self::NotChecked => Cow::Borrowed("not checked"),
+        }
+    }
+}
+
+fn sort_statuses_by_id(statuses: &mut [DocStatus]) {
+    statuses.sort_unstable_by(|left, right| left.id.cmp(&right.id));
+}
+
+fn build_status_snapshot(
+    configs: &HashMap<domain::Id, domain::Config>,
+    data_map: &HashMap<domain::Id, domain::Data>,
+) -> Vec<DocStatus> {
+    let mut statuses = configs
+        .iter()
+        .map(|(id, config)| {
+            let data = data_map.get(id);
+            DocStatus {
+                id: id.to_string(),
+                url: config.url.as_str().to_owned(),
+                status: PollStatus::from_data(data).api_label().to_owned(),
+                last_updated_unix_ms: data
+                    .and_then(|data| data.last_updated)
+                    .map(|timestamp| timestamp.unix_millis()),
+                last_checked_unix_ms: data
+                    .and_then(|data| data.last_checked)
+                    .map(|timestamp| timestamp.unix_millis()),
+                last_attempted_unix_ms: data
+                    .and_then(|data| data.last_attempted)
+                    .map(|timestamp| timestamp.unix_millis()),
+                last_success_unix_ms: data
+                    .and_then(|data| data.last_success)
+                    .map(|timestamp| timestamp.unix_millis()),
+                consecutive_failures: data
+                    .map(|data| data.consecutive_failures)
+                    .unwrap_or_default(),
+                last_error: data.and_then(|data| data.last_error.clone()),
+            }
+        })
+        .collect::<Vec<_>>();
+    sort_statuses_by_id(&mut statuses);
+    statuses
+}
+
+async fn next_cycle_tick(
+    interval: &mut tokio::time::Interval,
+    shutdown: &mut Option<watch::Receiver<bool>>,
+) -> Option<tokio::time::Instant> {
+    loop {
+        let Some(shutdown) = shutdown.as_mut() else {
+            return Some(interval.tick().await);
+        };
+        if *shutdown.borrow() {
+            return None;
+        }
+        tokio::select! {
+            tick = interval.tick() => {
+                if *shutdown.borrow() {
+                    return None;
+                }
+                return Some(tick);
+            }
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    return None;
+                }
+            }
+        }
+    }
+}
+
 impl<ConfigRepository, DataRepository, Poller> App<ConfigRepository, DataRepository, Poller>
 where
     ConfigRepository: domain::ConfigRepository + Send,
@@ -122,6 +233,28 @@ where
         tx_status: watch::Sender<Vec<DocStatus>>,
         tx_history: Option<mpsc::Sender<DocChangeBatch>>,
     ) -> Result<(), Error<ConfigRepository::Error, DataRepository::Error, Poller::Error>> {
+        self.run_with_history_inner(tx_doc_update, tx_status, tx_history, None)
+            .await
+    }
+
+    pub async fn run_with_history_and_shutdown(
+        self,
+        tx_doc_update: mpsc::Sender<DocUpdateInfo>,
+        tx_status: watch::Sender<Vec<DocStatus>>,
+        tx_history: Option<mpsc::Sender<DocChangeBatch>>,
+        shutdown: watch::Receiver<bool>,
+    ) -> Result<(), Error<ConfigRepository::Error, DataRepository::Error, Poller::Error>> {
+        self.run_with_history_inner(tx_doc_update, tx_status, tx_history, Some(shutdown))
+            .await
+    }
+
+    async fn run_with_history_inner(
+        self,
+        tx_doc_update: mpsc::Sender<DocUpdateInfo>,
+        tx_status: watch::Sender<Vec<DocStatus>>,
+        tx_history: Option<mpsc::Sender<DocChangeBatch>>,
+        mut shutdown: Option<watch::Receiver<bool>>,
+    ) -> Result<(), Error<ConfigRepository::Error, DataRepository::Error, Poller::Error>> {
         let Self {
             mut data_repo,
             mut config_repo,
@@ -133,16 +266,19 @@ where
 
         let mut interval = tokio::time::interval(period);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut failed_ids = match data_repo.get_all().await {
-            Ok(data) => data
-                .into_iter()
-                .filter_map(|(id, data)| (data.consecutive_failures > 0).then_some(id))
-                .collect::<HashSet<_>>(),
+        let startup_data = match data_repo.get_all().await {
+            Ok(data) => data,
             Err(error) => {
                 warn!("{error}");
-                HashSet::new()
+                HashMap::new()
             }
         };
+        let mut failed_ids = startup_data
+            .iter()
+            .filter_map(|(id, data)| (data.consecutive_failures > 0).then_some(id))
+            .cloned()
+            .collect::<HashSet<_>>();
+        let mut startup_data = Some(startup_data);
 
         loop {
             match &mut limit {
@@ -152,7 +288,9 @@ where
             }
 
             info!("waiting for next interval period...");
-            let now = interval.tick().await;
+            let Some(now) = next_cycle_tick(&mut interval, &mut shutdown).await else {
+                break;
+            };
             let deadline = now + period;
 
             if let Err(error) = config_repo.reload().await {
@@ -164,11 +302,20 @@ where
                 .await
                 .map_err(Error::ConfigRepositoryError)?;
 
+            if let Some(data) = startup_data.as_ref() {
+                tx_status.send_replace(build_status_snapshot(&configs, data));
+            }
+
             let has_custom_intervals = configs
                 .values()
                 .any(|config| config.poll_interval_minutes.is_some());
             let schedule_data = if poll_all_once || !has_custom_intervals {
+                let _ = startup_data.take();
                 HashMap::new()
+            } else if let Some(data) = startup_data.take() {
+                data.into_iter()
+                    .filter(|(id, _)| configs.contains_key(id))
+                    .collect()
             } else {
                 let configured_ids = configs.keys().cloned().collect::<HashSet<_>>();
                 match data_repo.get_multiple(configured_ids).await {
@@ -210,19 +357,26 @@ where
             let mut successful_contents = HashMap::new();
             let mut empty_successes = HashSet::new();
             let mut retry = 3;
+            let mut retry_number = 0;
 
             while !rem.is_empty() && 0 < retry && tokio::time::Instant::now() < deadline {
-                let poll_stream = poller.poll_multiple(rem.clone()).await;
+                let mut pending = rem.keys().cloned().collect::<HashSet<_>>();
+                let poll_stream = poller.poll_multiple(std::mem::take(&mut rem)).await;
                 tokio::pin!(poll_stream);
 
                 while let Ok(Some((id, result))) =
                     tokio::time::timeout_at(deadline, poll_stream.next()).await
                 {
                     let content = match result {
-                        Ok(x) => x,
+                        Ok(content) => {
+                            pending.remove(&id);
+                            latest_errors.remove(&id);
+                            content
+                        }
                         Err(why) => {
                             warn!("[{id}]: {why}");
                             latest_errors.insert(id.clone(), why.to_string());
+                            pending.insert(id);
                             continue;
                         }
                     };
@@ -232,7 +386,6 @@ where
                     if content.is_empty() {
                         warn!("[{id}]: ignore empty content.");
                         empty_successes.insert(id.clone());
-                        let _ = rem.remove(&id);
                         continue;
                     }
 
@@ -243,10 +396,25 @@ where
                     if tx_history.is_some() {
                         successful_contents.insert(id.clone(), bounded_history_content(content));
                     }
-                    let _ = rem.remove(&id);
+                }
+
+                for id in pending {
+                    if let Some(config) = configs.get(&id) {
+                        let _ = rem.insert(id, config.clone());
+                    }
                 }
 
                 retry -= 1;
+                if !rem.is_empty() && retry > 0 {
+                    retry_number += 1;
+                    let backoff = retry_backoff(retry_number);
+                    if tokio::time::timeout_at(deadline, tokio::time::sleep(backoff))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
             }
 
             let failures: HashMap<domain::Id, String> = rem
@@ -258,11 +426,16 @@ where
                     (id.clone(), error)
                 })
                 .collect();
+            let mut newly_failed_errors = failures
+                .iter()
+                .filter(|&(id, _)| !failed_ids.contains(id))
+                .map(|(id, error)| (id.clone(), error.clone()))
+                .collect::<HashMap<_, _>>();
             let empty_success_ids = empty_successes.iter().cloned().collect::<Vec<_>>();
             let mut history_changes = Vec::new();
             let mut cycle_updates = Vec::new();
             match data_repo
-                .record_poll_results(successful_hashes, empty_successes, failures.clone())
+                .record_poll_results(successful_hashes, empty_successes, failures)
                 .await
             {
                 Ok(batch) => {
@@ -323,7 +496,7 @@ where
                                 url: configs[&id].url.as_str().to_owned(),
                                 timestamp: Timestamp::now().to_string(),
                                 consecutive_failures: Some(consecutive_failures),
-                                error: failures.get(&id).cloned(),
+                                error: newly_failed_errors.remove(&id),
                             });
                         }
                     }
@@ -364,40 +537,7 @@ where
                     continue;
                 }
             };
-            tx_status.send_replace(
-                configs
-                    .iter()
-                    .map(|(id, config)| {
-                        let data = data_map.get(id);
-                        DocStatus {
-                            id: id.to_string(),
-                            url: config.url.as_str().to_owned(),
-                            status: match data {
-                                Some(data) if data.consecutive_failures > 0 => "failed",
-                                Some(data) if data.last_success.is_some() => "ok",
-                                _ => "not_checked",
-                            }
-                            .to_owned(),
-                            last_updated_unix_ms: data
-                                .and_then(|data| data.last_updated)
-                                .map(|timestamp| timestamp.unix_millis()),
-                            last_checked_unix_ms: data
-                                .and_then(|data| data.last_checked)
-                                .map(|timestamp| timestamp.unix_millis()),
-                            last_attempted_unix_ms: data
-                                .and_then(|data| data.last_attempted)
-                                .map(|timestamp| timestamp.unix_millis()),
-                            last_success_unix_ms: data
-                                .and_then(|data| data.last_success)
-                                .map(|timestamp| timestamp.unix_millis()),
-                            consecutive_failures: data
-                                .map(|data| data.consecutive_failures)
-                                .unwrap_or_default(),
-                            last_error: data.and_then(|data| data.last_error.clone()),
-                        }
-                    })
-                    .collect(),
-            );
+            tx_status.send_replace(build_status_snapshot(&configs, &data_map));
             let mut data_list: Vec<_> = configs.keys().map(|id| (id, data_map.get(id))).collect();
             data_list.sort_by_key(|(_, data)| data.and_then(|data| data.last_updated));
 
@@ -410,13 +550,7 @@ where
             table.add_row(row!["name", "status", "last_updated", "url",]);
             for (id, data) in data_list {
                 let config = &configs[id];
-                let status = match data {
-                    Some(data) if data.consecutive_failures > 0 => {
-                        format!("failed ({})", data.consecutive_failures)
-                    }
-                    Some(data) if data.last_success.is_some() => "ok".to_owned(),
-                    _ => "not checked".to_owned(),
-                };
+                let status = PollStatus::from_data(data).terminal_label();
                 let last_updated = data.and_then(|data| data.last_updated);
                 let color = match last_updated {
                     Some(t) if one_hour_ago < t => color::BRIGHT_GREEN,
@@ -425,7 +559,7 @@ where
                 };
                 table.add_row(Row::new(vec![
                     Cell::new(id.as_str()).with_style(Attr::ForegroundColor(color)),
-                    Cell::new(&status),
+                    Cell::new(status.as_ref()),
                     Cell::new(
                         &last_updated
                             .map(|time| time.to_string())
@@ -475,10 +609,17 @@ where
 impl<ConfigRepositoryError, DataRepositoryError, PollerError> std::error::Error
     for Error<ConfigRepositoryError, DataRepositoryError, PollerError>
 where
-    ConfigRepositoryError: std::error::Error,
-    DataRepositoryError: std::error::Error,
-    PollerError: std::error::Error,
+    ConfigRepositoryError: std::error::Error + 'static,
+    DataRepositoryError: std::error::Error + 'static,
+    PollerError: std::error::Error + 'static,
 {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::ConfigRepositoryError(error) => Some(error),
+            Self::DataRepositoryError(error) => Some(error),
+            Self::PollerError(error) => Some(error),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -499,7 +640,69 @@ mod tests {
         infrastructure::{TomlConfigRepository, TomlDataRepository},
     };
 
-    use super::{bounded_history_content, HISTORY_CONTENT_LIMIT_BYTES};
+    use super::{
+        bounded_history_content, retry_backoff, sort_statuses_by_id, DocStatus, PollStatus,
+        HISTORY_CONTENT_LIMIT_BYTES,
+    };
+
+    #[test]
+    fn retry_backoff_grows_exponentially_and_saturates() {
+        assert_eq!(retry_backoff(1), std::time::Duration::from_millis(250));
+        assert_eq!(retry_backoff(2), std::time::Duration::from_millis(500));
+        assert_eq!(retry_backoff(0), std::time::Duration::from_millis(250));
+        assert_eq!(
+            retry_backoff(u8::MAX),
+            super::RETRY_BACKOFF_BASE.saturating_mul(u32::MAX)
+        );
+    }
+
+    #[test]
+    fn status_snapshots_are_sorted_by_id() {
+        let status = |id: &str| DocStatus {
+            id: id.to_owned(),
+            url: String::new(),
+            status: "not_checked".to_owned(),
+            last_updated_unix_ms: None,
+            last_checked_unix_ms: None,
+            last_attempted_unix_ms: None,
+            last_success_unix_ms: None,
+            consecutive_failures: 0,
+            last_error: None,
+        };
+        let mut statuses = vec![status("z-page"), status("a-page")];
+
+        sort_statuses_by_id(&mut statuses);
+
+        assert_eq!(statuses[0].id, "a-page");
+        assert_eq!(statuses[1].id, "z-page");
+    }
+
+    #[test]
+    fn poll_status_mapping_keeps_api_and_terminal_labels_consistent() {
+        assert_eq!(PollStatus::from_data(None).api_label(), "not_checked");
+        assert_eq!(PollStatus::from_data(None).terminal_label(), "not checked");
+
+        let successful = Data {
+            last_success: Some(Timestamp::now()),
+            ..Data::default()
+        };
+        assert_eq!(PollStatus::from_data(Some(&successful)).api_label(), "ok");
+        assert_eq!(
+            PollStatus::from_data(Some(&successful)).terminal_label(),
+            "ok"
+        );
+
+        let failed = Data {
+            last_success: Some(Timestamp::now()),
+            consecutive_failures: 2,
+            ..Data::default()
+        };
+        assert_eq!(PollStatus::from_data(Some(&failed)).api_label(), "failed");
+        assert_eq!(
+            PollStatus::from_data(Some(&failed)).terminal_label(),
+            "failed (2)"
+        );
+    }
 
     #[derive(Debug, Clone)]
     struct TestPollerError;
@@ -614,10 +817,26 @@ mod tests {
             "configuration repository error: test poller error"
         );
         assert_eq!(
+            std::error::Error::source(&config_error)
+                .unwrap()
+                .to_string(),
+            "test poller error"
+        );
+        assert_eq!(
             data_error.to_string(),
             "data repository error: test poller error"
         );
+        assert_eq!(
+            std::error::Error::source(&data_error).unwrap().to_string(),
+            "test poller error"
+        );
         assert_eq!(poller_error.to_string(), "poller error: test poller error");
+        assert_eq!(
+            std::error::Error::source(&poller_error)
+                .unwrap()
+                .to_string(),
+            "test poller error"
+        );
     }
 
     #[derive(Debug)]
@@ -695,6 +914,49 @@ mod tests {
         }
     }
 
+    struct RetryTrackingPoller(std::sync::Arc<std::sync::Mutex<Vec<tokio::time::Instant>>>);
+
+    #[async_trait::async_trait]
+    impl Poller for RetryTrackingPoller {
+        type Error = TestPollerError;
+        type Stream = Pin<Box<dyn Stream<Item = (Id, Result<String, Self::Error>)> + Send>>;
+
+        async fn poll(&mut self, _id: Id, _config: Config) -> Result<String, Self::Error> {
+            Err(TestPollerError)
+        }
+
+        async fn poll_multiple(&mut self, configs: HashMap<Id, Config>) -> Self::Stream {
+            self.0.lock().unwrap().push(tokio::time::Instant::now());
+            Box::pin(stream::iter(
+                configs.into_keys().map(|id| (id, Err(TestPollerError))),
+            ))
+        }
+    }
+
+    struct FailOncePoller(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+    #[async_trait::async_trait]
+    impl Poller for FailOncePoller {
+        type Error = TestPollerError;
+        type Stream = Pin<Box<dyn Stream<Item = (Id, Result<String, Self::Error>)> + Send>>;
+
+        async fn poll(&mut self, _id: Id, _config: Config) -> Result<String, Self::Error> {
+            Err(TestPollerError)
+        }
+
+        async fn poll_multiple(&mut self, configs: HashMap<Id, Config>) -> Self::Stream {
+            let attempt = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(stream::iter(configs.into_keys().map(move |id| {
+                let result = if attempt == 0 {
+                    Err(TestPollerError)
+                } else {
+                    Ok("recovered content".to_owned())
+                };
+                (id, result)
+            })))
+        }
+    }
+
     fn temp_file(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("patrol-app-{name}-{}.toml", uuid::Uuid::new_v4()))
     }
@@ -727,6 +989,123 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn publishes_saved_status_before_the_first_poll_finishes() {
+        let data_path = temp_file("startup-status-data");
+        let id = Id::try_from("Page".to_owned()).unwrap();
+        let config = Config {
+            url: crate::domain::Url::new("https://example.com/page".to_owned()).unwrap(),
+            selector: crate::domain::Selector::new("main".to_owned()).unwrap(),
+            mode: crate::domain::Mode::Simple,
+            wait_seconds: None,
+            exclude_selectors: Vec::new(),
+            normalize_whitespace: false,
+            poll_interval_minutes: None,
+        };
+        let mut data_repo = TomlDataRepository::new(data_path.to_str().unwrap())
+            .await
+            .unwrap();
+        data_repo
+            .update(id.clone(), Hash::new("previous content"))
+            .await
+            .unwrap();
+        let app = App::new(
+            ReloadingConfigRepository {
+                id,
+                config: config.clone(),
+                next_config: config,
+            },
+            data_repo,
+            PendingPoller(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0))),
+            60,
+            None,
+        );
+        let (tx_update, _rx_update) = tokio::sync::mpsc::channel(16);
+        let (tx_status, mut rx_status) = watch::channel(Vec::new());
+        let run_task = tokio::spawn(app.run_with_status(tx_update, tx_status));
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), rx_status.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        let snapshot = rx_status.borrow();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].status, "ok");
+        assert_eq!(snapshot[0].id, "Page");
+
+        run_task.abort();
+        let _ = run_task.await;
+        std::fs::remove_file(data_path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_finishes_the_current_cycle_without_starting_another() {
+        let data_path = temp_file("graceful-shutdown-data");
+        let id = Id::try_from("Page".to_owned()).unwrap();
+        let config = Config {
+            url: crate::domain::Url::new("https://example.com/page".to_owned()).unwrap(),
+            selector: crate::domain::Selector::new("main".to_owned()).unwrap(),
+            mode: crate::domain::Mode::Simple,
+            wait_seconds: None,
+            exclude_selectors: Vec::new(),
+            normalize_whitespace: false,
+            poll_interval_minutes: None,
+        };
+        let data_repo = TomlDataRepository::new(data_path.to_str().unwrap())
+            .await
+            .unwrap();
+        let poller_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let app = App::new(
+            ReloadingConfigRepository {
+                id: id.clone(),
+                config: config.clone(),
+                next_config: config,
+            },
+            data_repo,
+            PendingPoller(poller_calls.clone()),
+            1,
+            None,
+        );
+        let (tx_update, _rx_update) = tokio::sync::mpsc::channel(16);
+        let (tx_status, _rx_status) = watch::channel(Vec::new());
+        let (tx_shutdown, rx_shutdown) = watch::channel(false);
+        let run_task = tokio::spawn(app.run_with_history_and_shutdown(
+            tx_update,
+            tx_status,
+            None,
+            rx_shutdown,
+        ));
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while poller_calls.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        tx_shutdown.send_replace(true);
+        tokio::time::timeout(std::time::Duration::from_secs(2), run_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(poller_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let mut data_repo = TomlDataRepository::new(data_path.to_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            data_repo
+                .get(id)
+                .await
+                .unwrap()
+                .unwrap()
+                .consecutive_failures,
+            1
+        );
+        std::fs::remove_file(data_path).unwrap();
+    }
+
+    #[tokio::test]
     async fn run_does_not_start_retries_after_cycle_deadline() {
         let data_path = temp_file("deadline-retries-data");
         let id = Id::try_from("Page".to_owned()).unwrap();
@@ -755,6 +1134,94 @@ mod tests {
         app.run(tx).await.unwrap();
 
         assert_eq!(poller_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        std::fs::remove_file(data_path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn retries_failed_pages_with_backoff_before_recording_failure() {
+        let data_path = temp_file("retry-backoff-data");
+        let id = Id::try_from("Page".to_owned()).unwrap();
+        let config = Config {
+            url: crate::domain::Url::new("https://example.com/page".to_owned()).unwrap(),
+            selector: crate::domain::Selector::new("main".to_owned()).unwrap(),
+            mode: crate::domain::Mode::Simple,
+            wait_seconds: None,
+            exclude_selectors: Vec::new(),
+            normalize_whitespace: false,
+            poll_interval_minutes: None,
+        };
+        let data_repo = TomlDataRepository::new(data_path.to_str().unwrap())
+            .await
+            .unwrap();
+        let attempts = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let app = App::new(
+            ReloadingConfigRepository {
+                id: id.clone(),
+                config: config.clone(),
+                next_config: config,
+            },
+            data_repo,
+            RetryTrackingPoller(attempts.clone()),
+            5,
+            Some(1),
+        );
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+
+        app.run(tx).await.unwrap();
+
+        let attempts = attempts.lock().unwrap();
+        assert_eq!(attempts.len(), 3);
+        assert!(attempts[1].duration_since(attempts[0]) >= std::time::Duration::from_millis(240));
+        assert!(attempts[2].duration_since(attempts[1]) >= std::time::Duration::from_millis(490));
+        drop(attempts);
+        std::fs::remove_file(data_path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn retry_success_persists_content_without_emitting_failure() {
+        let data_path = temp_file("retry-success-data");
+        let id = Id::try_from("Page".to_owned()).unwrap();
+        let config = Config {
+            url: crate::domain::Url::new("https://example.com/page".to_owned()).unwrap(),
+            selector: crate::domain::Selector::new("main".to_owned()).unwrap(),
+            mode: crate::domain::Mode::Simple,
+            wait_seconds: None,
+            exclude_selectors: Vec::new(),
+            normalize_whitespace: false,
+            poll_interval_minutes: None,
+        };
+        let data_repo = TomlDataRepository::new(data_path.to_str().unwrap())
+            .await
+            .unwrap();
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let app = App::new(
+            ReloadingConfigRepository {
+                id: id.clone(),
+                config: config.clone(),
+                next_config: config,
+            },
+            data_repo,
+            FailOncePoller(attempts.clone()),
+            5,
+            Some(1),
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+
+        app.run(tx).await.unwrap();
+
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+        let event = rx.try_recv().unwrap();
+        assert_eq!(event.event, super::DocUpdateEvent::Changed);
+        assert!(rx.try_recv().is_err());
+        let mut data_repo = TomlDataRepository::new(data_path.to_str().unwrap())
+            .await
+            .unwrap();
+        let data = data_repo.get(id).await.unwrap().unwrap();
+        assert_eq!(data.hash, Some(Hash::new("recovered content")));
+        assert_eq!(data.consecutive_failures, 0);
+        assert_eq!(data.last_error, None);
+
+        drop(data_repo);
         std::fs::remove_file(data_path).unwrap();
     }
 
