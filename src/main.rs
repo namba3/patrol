@@ -88,7 +88,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_repo = TomlConfigRepository::new(&args.config_path).await?;
     let data_repo = TomlDataRepository::new(&args.data_path).await?;
 
-    // let full_mode_poller = WebDriverPoller::new(args.webdriver_ports.as_slice()).await?;
     let full_mode_poller = PlaywrightPoller::new(args.worker_num).await?;
     let simple_mode_poller = HttpPoller::new(args.simple_worker_num as usize);
 
@@ -106,7 +105,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         interval_limit,
     );
 
-    let message_dealer = tokio::spawn(async move {
+    let _message_dealer = tokio::spawn(async move {
         while let Some(x) = rx_doc_update.recv().await {
             let msg = serde_json::to_string(&x).unwrap();
 
@@ -133,7 +132,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        tx_command.send(());
+        let _ = tx_command.send(());
     });
 
     tokio::select! {
