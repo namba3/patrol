@@ -290,15 +290,7 @@ mod tests {
 
         async fn update(&mut self, id: Id, hash: Hash) -> Result<Option<Timestamp>, Self::Error> {
             let now = Timestamp::now();
-            let data = self.data.entry(id).or_insert(Data {
-                hash: None,
-                last_updated: None,
-                last_checked: None,
-                last_attempted: None,
-                last_success: None,
-                consecutive_failures: 0,
-                last_error: None,
-            });
+            let data = self.data.entry(id).or_default();
             let changed = data.hash.as_ref() != Some(&hash);
             if changed {
                 data.last_updated = Some(now);
@@ -314,15 +306,7 @@ mod tests {
 
         async fn record_failure(&mut self, id: Id, error: String) -> Result<u32, Self::Error> {
             let now = Timestamp::now();
-            let data = self.data.entry(id).or_insert(Data {
-                hash: None,
-                last_updated: None,
-                last_checked: None,
-                last_attempted: None,
-                last_success: None,
-                consecutive_failures: 0,
-                last_error: None,
-            });
+            let data = self.data.entry(id).or_default();
             data.last_attempted = Some(now);
             data.consecutive_failures = data.consecutive_failures.saturating_add(1);
             data.last_error = Some(error);
@@ -331,15 +315,7 @@ mod tests {
 
         async fn record_success(&mut self, id: Id) -> Result<(), Self::Error> {
             let now = Timestamp::now();
-            let data = self.data.entry(id).or_insert(Data {
-                hash: None,
-                last_updated: None,
-                last_checked: None,
-                last_attempted: None,
-                last_success: None,
-                consecutive_failures: 0,
-                last_error: None,
-            });
+            let data = self.data.entry(id).or_default();
             data.last_attempted = Some(now);
             data.last_success = Some(now);
             data.consecutive_failures = 0;

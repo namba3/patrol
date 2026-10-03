@@ -20,7 +20,7 @@ pub struct Config {
     pub wait_seconds: Option<u16>,
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug, Clone, Default)]
 pub struct Data {
     pub hash: Option<Hash>,
     pub last_updated: Option<Timestamp>,

@@ -26,15 +26,7 @@ impl TomlDataRepository {
             .unwrap()
             .get_mut(&id)
             .map(|x| x.clone())
-            .unwrap_or_else(|| Data {
-                hash: None,
-                last_updated: None,
-                last_checked: None,
-                last_attempted: None,
-                last_success: None,
-                consecutive_failures: 0,
-                last_error: None,
-            });
+            .unwrap_or_default();
 
         data.last_checked = Some(now);
         data.last_attempted = Some(now);
@@ -132,15 +124,7 @@ impl DataRepository for TomlDataRepository {
             .get_cache_mut()
             .unwrap()
             .entry(id.clone())
-            .or_insert_with(|| Data {
-                hash: None,
-                last_updated: None,
-                last_checked: None,
-                last_attempted: None,
-                last_success: None,
-                consecutive_failures: 0,
-                last_error: None,
-            });
+            .or_default();
 
         data.last_attempted = Some(now);
         data.last_success = Some(now);
@@ -170,15 +154,7 @@ impl DataRepository for TomlDataRepository {
             .get_cache_mut()
             .unwrap()
             .entry(id.clone())
-            .or_insert_with(|| Data {
-                hash: None,
-                last_updated: None,
-                last_checked: None,
-                last_attempted: None,
-                last_success: None,
-                consecutive_failures: 0,
-                last_error: None,
-            });
+            .or_default();
 
         data.last_attempted = Some(now);
         data.consecutive_failures = data.consecutive_failures.saturating_add(1);
