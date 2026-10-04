@@ -26,3 +26,7 @@ After startup, open the status page at [http://localhost:3000/ui](http://localho
 - [Usage and configuration](docs/usage.md)
 - [Architecture and runtime flow](docs/architecture.md)
 - [Development guide](docs/development.md)
+
+## License
+
+This project is available under the terms of either the [MIT License](LICENSE-MIT) or the [Apache License 2.0](LICENSE-APACHE).

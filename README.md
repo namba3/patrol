@@ -26,3 +26,7 @@ cp config.example.toml config.toml
 - [利用方法と設定ファイル](docs/usage.md)
 - [アーキテクチャと処理の流れ](docs/architecture.md)
 - [開発ガイド](docs/development.md)
+
+## ライセンス
+
+このプロジェクトは [MIT License](LICENSE-MIT) または [Apache License 2.0](LICENSE-APACHE) の条件で利用できます。
