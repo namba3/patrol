@@ -75,6 +75,16 @@ PLAYWRIGHT_SKIP_DRIVER_DOWNLOAD=1 cargo test
 
 GitHub Actionsの`.github/workflows/ci.yml`は、pushとpull requestで書式チェック、Clippy、テスト、releaseビルドを実行します。CIではドライバー取得を省略するため、実ブラウザーの起動は確認しません。
 
+## ベンチマーク
+
+nightlyの`test` featureや`#[bench]`は使わず、`benches/manual.rs`を通常の実行ファイルとして実行します。`std::time::Instant`で計測し、`std::hint::black_box`で計算結果が最適化で除去されないようにします。
+
+```sh
+cargo bench --bench manual
+```
+
+SHA-256計算は64 B、4 KiB、1 MiBの入力を計測し、各サンプルでおよそ8 MiBを処理します。CSSセレクター解析は同じセレクターを各サンプルで10,000回解析します。各処理はウォームアップ後に5回計測し、中央値をns/opで表示します。比較時は同じマシン、同じRust toolchain、同じrelease設定で実行してください。これは専用の統計ベンチマークフレームワークではなく、処理時間を手早く比較するための目安です。
+
 ## 資料の更新
 
 利用者向けの挙動、引数、設定項目を変えた場合は`docs/usage.md`を更新してください。レイヤーや実行経路を変えた場合は`docs/architecture.md`と必要に応じて本書も更新します。READMEは概要とクイックスタートを保ち、詳細を重複して抱えないようにします。
