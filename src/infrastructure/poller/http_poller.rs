@@ -256,11 +256,24 @@ mod tests {
         max_active: Arc<AtomicUsize>,
     }
 
+    #[derive(Clone)]
+    struct RequestStartTracker {
+        started: Arc<AtomicUsize>,
+        first_request: Arc<tokio::sync::Notify>,
+    }
+
     async fn delayed_response(State(tracker): State<RequestTracker>) -> &'static str {
         let active = tracker.active.fetch_add(1, Ordering::SeqCst) + 1;
         tracker.max_active.fetch_max(active, Ordering::SeqCst);
         tokio::time::sleep(std::time::Duration::from_millis(80)).await;
         tracker.active.fetch_sub(1, Ordering::SeqCst);
+        "<p>response</p>"
+    }
+
+    async fn tracked_slow_response(State(tracker): State<RequestStartTracker>) -> &'static str {
+        tracker.started.fetch_add(1, Ordering::SeqCst);
+        tracker.first_request.notify_one();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         "<p>response</p>"
     }
 
@@ -441,6 +454,54 @@ mod tests {
             .all(|(_, result)| matches!(result.as_deref(), Ok("response"))));
         assert_eq!(tracker.max_active.load(Ordering::SeqCst), 2);
 
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn dropping_poll_stream_does_not_start_queued_requests() {
+        let tracker = RequestStartTracker {
+            started: Arc::new(AtomicUsize::new(0)),
+            first_request: Arc::new(tokio::sync::Notify::new()),
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = Router::new()
+            .route("/{_page}", get(tracked_slow_response))
+            .with_state(tracker.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+
+        let configs = (0..4)
+            .map(|index| {
+                (
+                    Id::try_from(format!("CancelPage{index}")).unwrap(),
+                    Config {
+                        url: Url::new(format!("http://{address}/page{index}")).unwrap(),
+                        selector: Selector::new("p".to_owned()).unwrap(),
+                        mode: Mode::Simple,
+                        wait_seconds: None,
+                        exclude_selectors: Vec::new(),
+                        normalize_whitespace: false,
+                        poll_interval_minutes: None,
+                    },
+                )
+            })
+            .collect();
+        let mut poller = HttpPoller::new(1);
+        let mut results = poller.poll_multiple(configs).await;
+        {
+            let mut first_result = Box::pin(results.next());
+            tokio::select! {
+                _ = tracker.first_request.notified() => (),
+                result = &mut first_result => panic!("poll stream ended before a request started: {result:?}"),
+            }
+        }
+
+        drop(results);
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+
+        assert_eq!(tracker.started.load(Ordering::SeqCst), 1);
         server.abort();
     }
 

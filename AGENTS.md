@@ -21,3 +21,9 @@
 - Preserve unrelated user changes and inspect the working tree before editing.
 - Avoid changing public contracts or persisted TOML formats unless the task calls for it; document any such change.
 - Keep edits focused on the requested scope and avoid introducing dependencies for documentation-only work.
+
+## Privacy and file paths
+
+- Do not commit personal information, credentials, or other private data. Use clearly fictional examples or placeholders when examples are needed.
+- Do not include machine-specific absolute file paths in repository files, documentation, examples, or logs. Prefer repository-relative paths or portable commands.
+- When personal information or an absolute file path is found, remove it or replace it with a non-identifying placeholder, and check nearby content for related disclosures before committing.

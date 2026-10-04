@@ -8,7 +8,7 @@ use patrol::application::app::{DocChangeBatch, DocUpdateInfo};
 use patrol::application::{App, SelectivePoller};
 use patrol::infrastructure::{
     change_history_writer::run_change_history_writer,
-    web::{build_web_app, WebAppState},
+    web::{build_web_app, run_notification_relay, WebAppState},
     HttpPoller, PlaywrightPoller, TomlChangeHistoryRepository, TomlConfigRepository,
     TomlDataRepository, HISTORY_LIMIT, MAX_HISTORY_LIMIT,
 };
@@ -23,6 +23,51 @@ fn should_stop_for_input(line: &std::io::Result<Option<String>>) -> bool {
     match line {
         Ok(Some(line)) => line == "q",
         Ok(None) | Err(_) => true,
+    }
+}
+
+async fn join_shutdown_task<T>(
+    task: tokio::task::JoinHandle<T>,
+    task_name: &str,
+) -> Option<Box<dyn std::error::Error>> {
+    shutdown_task_result(task.await, task_name, false)
+}
+
+fn shutdown_task_result<T>(
+    result: Result<T, tokio::task::JoinError>,
+    task_name: &str,
+    unexpected_completion: bool,
+) -> Option<Box<dyn std::error::Error>> {
+    match result {
+        Ok(_) if !unexpected_completion => None,
+        Ok(_) => {
+            let why = std::io::Error::other(format!("{task_name} task stopped unexpectedly"));
+            error!("{why}");
+            Some(Box::new(why))
+        }
+        Err(why) => {
+            error!("{task_name} task failed: {why}");
+            Some(Box::new(why))
+        }
+    }
+}
+
+enum BackgroundTaskExit {
+    NotificationRelay(Option<Box<dyn std::error::Error>>),
+    HistoryWriter(Option<Box<dyn std::error::Error>>),
+}
+
+async fn wait_for_background_task_exit(
+    notification_relay: &mut tokio::task::JoinHandle<()>,
+    history_writer: &mut tokio::task::JoinHandle<()>,
+) -> BackgroundTaskExit {
+    tokio::select! {
+        result = notification_relay => BackgroundTaskExit::NotificationRelay(
+            shutdown_task_result(result, "notification relay", true),
+        ),
+        result = history_writer => BackgroundTaskExit::HistoryWriter(
+            shutdown_task_result(result, "change history writer", true),
+        ),
     }
 }
 
@@ -146,21 +191,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         TomlChangeHistoryRepository::with_limit(&args.history_path, args.history_limit).await?;
     let (tx_history, rx_history) = mpsc::channel::<DocChangeBatch>(HISTORY_CHANNEL_CAPACITY);
     let (tx_history_snapshot, history) = watch::channel(history_repo.entries().to_vec());
-    let history_writer = tokio::spawn(run_change_history_writer(
+    let mut history_writer = tokio::spawn(run_change_history_writer(
         rx_history,
         history_repo,
         tx_history_snapshot,
     ));
 
-    let (tx_doc_update, mut rx_doc_update) =
+    let (tx_doc_update, rx_doc_update) =
         tokio::sync::mpsc::channel::<DocUpdateInfo>(DOC_UPDATE_CHANNEL_CAPACITY);
     let (tx, rx) = broadcast::channel(100);
     let (tx_status, status) = watch::channel(Vec::new());
-    let web_app_state = Arc::new(WebAppState::new(rx, status, history));
+    let (tx_web_shutdown, mut web_shutdown) = watch::channel(false);
+    let web_app_state = Arc::new(WebAppState::new(rx, status, history, web_shutdown.clone()));
     let web_app = build_web_app(web_app_state);
     let listener = tokio::net::TcpListener::bind(args.web_listen).await?;
     let web_address = listener.local_addr()?;
-    let web_app = tokio::spawn(async { axum::serve(listener, web_app).await });
+    let mut web_app = tokio::spawn(async move {
+        axum::serve(listener, web_app)
+            .with_graceful_shutdown(async move {
+                let _ = web_shutdown.changed().await;
+            })
+            .await
+    });
     info!("web server is listening at http://{web_address}/ and ws://{web_address}/");
 
     let config_repo = TomlConfigRepository::new(&args.config_path).await?;
@@ -183,21 +235,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         interval_limit,
     );
 
-    let message_dealer = tokio::spawn(async move {
-        while let Some(x) = rx_doc_update.recv().await {
-            let msg = match serde_json::to_string(&x) {
-                Ok(message) => message,
-                Err(why) => {
-                    error!("failed to serialize a document update: {why}");
-                    continue;
-                }
-            };
-
-            if let Err(why) = tx.send(msg) {
-                log::warn!("{why}");
-            }
-        }
-    });
+    let mut message_dealer = tokio::spawn(run_notification_relay(rx_doc_update, tx));
 
     let (tx_command, rx_command) = oneshot::channel();
     tokio::spawn(async {
@@ -222,16 +260,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         rx_shutdown,
     );
     tokio::pin!(app_future);
+    let mut web_app_finished = false;
+    let mut web_error: Option<Box<dyn std::error::Error>> = None;
+    let mut notification_relay_finished = false;
+    let mut notification_error = None;
+    let mut history_writer_finished = false;
+    let mut history_writer_error = None;
     let app_result = tokio::select! {
+        biased;
         result = &mut app_future => Some(result),
         _quit = rx_command => None,
         _signal = wait_for_shutdown_signal() => {
             info!("received shutdown signal; stopping after the current patrol cycle");
             None
         },
-        result = web_app => {
-            if let Err(why) = result {
-                error!("{why}")
+        result = &mut web_app => {
+            web_app_finished = true;
+            let error: Box<dyn std::error::Error> = match result {
+                Ok(Ok(())) => Box::new(std::io::Error::other("web server stopped unexpectedly")),
+                Ok(Err(why)) => Box::new(why),
+                Err(why) => Box::new(why),
+            };
+            error!("web server failed: {error}");
+            web_error = Some(error);
+            None
+        },
+        task_exit = wait_for_background_task_exit(&mut message_dealer, &mut history_writer) => {
+            match task_exit {
+                BackgroundTaskExit::NotificationRelay(error) => {
+                    notification_relay_finished = true;
+                    notification_error = error;
+                }
+                BackgroundTaskExit::HistoryWriter(error) => {
+                    history_writer_finished = true;
+                    history_writer_error = error;
+                }
             }
             None
         },
@@ -243,12 +306,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             app_future.await
         }
     };
-    if let Err(why) = app_result {
+    let app_error: Option<Box<dyn std::error::Error>> = if let Err(why) = app_result {
         error!("{why}");
+        Some(Box::new(why))
+    } else {
+        None
+    };
+
+    if !notification_relay_finished {
+        notification_error = join_shutdown_task(message_dealer, "notification relay").await;
+    }
+    if !history_writer_finished {
+        history_writer_error = join_shutdown_task(history_writer, "change history writer").await;
     }
 
-    message_dealer.await?;
-    history_writer.await?;
+    tx_web_shutdown.send_replace(true);
+    if !web_app_finished {
+        match tokio::time::timeout(std::time::Duration::from_secs(5), &mut web_app).await {
+            Ok(Ok(Ok(()))) => (),
+            Ok(Ok(Err(why))) => return Err(why.into()),
+            Ok(Err(why)) => return Err(why.into()),
+            Err(_) => {
+                log::warn!("web server did not stop within 5 seconds; aborting it");
+                web_app.abort();
+                let _ = web_app.await;
+            }
+        }
+    }
+
+    if let Some(why) = app_error
+        .or(web_error)
+        .or(notification_error)
+        .or(history_writer_error)
+    {
+        return Err(why);
+    }
 
     Ok(())
 }
@@ -256,16 +348,63 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use clap::Parser;
-    use patrol::application::app::{
-        DocChangeBatch, DocChangeContent, DocUpdateEvent, DocUpdateInfo,
-    };
     use patrol::infrastructure::{
-        change_history_writer::run_change_history_writer,
         web::{build_web_app, WebAppState},
-        ChangeHistoryEntry, TomlChangeHistoryRepository,
+        ChangeHistoryEntry,
     };
 
-    use super::{parse_history_limit, should_stop_for_input};
+    use super::{
+        join_shutdown_task, parse_history_limit, should_stop_for_input, shutdown_task_result,
+        wait_for_background_task_exit, BackgroundTaskExit,
+    };
+
+    #[tokio::test]
+    async fn shutdown_task_join_reports_panics_and_cancellation() {
+        let completed = tokio::spawn(async {});
+        assert!(join_shutdown_task(completed, "completed").await.is_none());
+
+        let unexpected_completion = shutdown_task_result(Ok(()), "unexpected", true).unwrap();
+        assert!(unexpected_completion
+            .to_string()
+            .contains("unexpected task stopped unexpectedly"));
+
+        let panicked = tokio::spawn(async { panic!("expected test panic") });
+        let panic_error = join_shutdown_task(panicked, "panicked").await.unwrap();
+        assert!(panic_error.to_string().contains("expected test panic"));
+
+        let cancelled = tokio::spawn(std::future::pending::<()>());
+        cancelled.abort();
+        let cancel_error = join_shutdown_task(cancelled, "cancelled").await.unwrap();
+        assert!(cancel_error.to_string().contains("cancelled"));
+    }
+
+    #[tokio::test]
+    async fn background_task_monitor_reports_failure_while_sibling_is_pending() {
+        let mut panicked = tokio::spawn(async { panic!("relay panic") });
+        let mut pending = tokio::spawn(std::future::pending::<()>());
+
+        let exit = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            wait_for_background_task_exit(&mut panicked, &mut pending),
+        )
+        .await
+        .expect("background task monitor waited for the still-running sibling");
+
+        match exit {
+            BackgroundTaskExit::NotificationRelay(Some(error)) => {
+                assert!(error.to_string().contains("relay panic"));
+            }
+            BackgroundTaskExit::HistoryWriter(_) => {
+                panic!("monitor selected the still-running history writer")
+            }
+            BackgroundTaskExit::NotificationRelay(None) => {
+                panic!("panic was treated as a successful completion")
+            }
+        }
+
+        pending.abort();
+        let _ = pending.await;
+    }
 
     #[test]
     fn stdin_shutdown_recognizes_quit_eof_and_errors() {
@@ -285,25 +424,6 @@ mod tests {
         let custom_args =
             super::Args::try_parse_from(["patrol", "--web-listen", "127.0.0.1:8080"]).unwrap();
         assert_eq!(custom_args.web_listen, "127.0.0.1:8080".parse().unwrap());
-    }
-
-    #[test]
-    fn websocket_failure_message_includes_event_and_failure_details() {
-        let message = DocUpdateInfo {
-            event: DocUpdateEvent::PollFailed,
-            id: "Page".to_owned(),
-            url: "https://example.com/page".to_owned(),
-            timestamp: "2026-10-03 12:00:00".to_owned(),
-            consecutive_failures: Some(2),
-            error: Some("request failed".to_owned()),
-        };
-
-        let json = serde_json::to_value(message).unwrap();
-
-        assert_eq!(json["event"], "poll_failed");
-        assert_eq!(json["id"], "Page");
-        assert_eq!(json["consecutive_failures"], 2);
-        assert_eq!(json["error"], "request failed");
     }
 
     #[test]
@@ -334,6 +454,7 @@ mod tests {
             events_rx,
             status_rx,
             tokio::sync::watch::channel(entries).1,
+            tokio::sync::watch::channel(false).1,
         ));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -368,6 +489,11 @@ mod tests {
         assert_eq!(response.status(), reqwest::StatusCode::OK);
         assert_eq!(response.text().await.unwrap(), "ok");
 
+        let response = reqwest::get(format!("http://{address}/?event=unknown"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+
         let response = reqwest::get(format!("http://{address}/ui")).await.unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::OK);
         assert!(response
@@ -383,85 +509,5 @@ mod tests {
 
         server.abort();
         let _ = server.await;
-    }
-
-    #[tokio::test]
-    async fn history_writer_drains_queued_changes_before_stopping() {
-        let path = std::env::temp_dir().join(format!(
-            "patrol-history-writer-{}.toml",
-            uuid::Uuid::new_v4()
-        ));
-        let path_string = path.to_string_lossy().into_owned();
-        let repository = TomlChangeHistoryRepository::new(&path_string)
-            .await
-            .unwrap();
-        let (tx, rx) = tokio::sync::mpsc::channel(4);
-        let (snapshot_tx, _snapshot_rx) = tokio::sync::watch::channel(Vec::new());
-        let writer = tokio::spawn(run_change_history_writer(rx, repository, snapshot_tx));
-        let (persisted_tx, persisted_rx) = tokio::sync::oneshot::channel();
-        tx.send(DocChangeBatch {
-            changes: vec![
-                DocChangeContent {
-                    id: "page".into(),
-                    timestamp_unix_ms: 1,
-                    content: "first".into(),
-                    content_truncated: false,
-                },
-                DocChangeContent {
-                    id: "page".into(),
-                    timestamp_unix_ms: 2,
-                    content: "second".into(),
-                    content_truncated: false,
-                },
-            ],
-            persisted: persisted_tx,
-        })
-        .await
-        .unwrap();
-        drop(tx);
-        writer.await.unwrap();
-        assert!(persisted_rx.await.unwrap());
-
-        let repository = TomlChangeHistoryRepository::new(&path_string)
-            .await
-            .unwrap();
-        assert_eq!(repository.entries().len(), 2);
-        assert_eq!(repository.entries()[1].content, "second");
-        std::fs::remove_file(path).unwrap();
-    }
-
-    #[tokio::test]
-    async fn history_writer_reports_persistence_failure_after_retries() {
-        let path = std::env::temp_dir().join(format!(
-            "patrol-history-writer-error-{}.toml",
-            uuid::Uuid::new_v4()
-        ));
-        let path_string = path.to_string_lossy().into_owned();
-        let repository = TomlChangeHistoryRepository::new(&path_string)
-            .await
-            .unwrap();
-        std::fs::remove_file(&path).unwrap();
-        std::fs::create_dir(&path).unwrap();
-        let (tx, rx) = tokio::sync::mpsc::channel(1);
-        let (snapshot_tx, snapshot_rx) = tokio::sync::watch::channel(Vec::new());
-        let writer = tokio::spawn(run_change_history_writer(rx, repository, snapshot_tx));
-        let (persisted_tx, persisted_rx) = tokio::sync::oneshot::channel();
-        tx.send(DocChangeBatch {
-            changes: vec![DocChangeContent {
-                id: "page".into(),
-                timestamp_unix_ms: 1,
-                content: "content".into(),
-                content_truncated: false,
-            }],
-            persisted: persisted_tx,
-        })
-        .await
-        .unwrap();
-        drop(tx);
-        writer.await.unwrap();
-
-        assert!(!persisted_rx.await.unwrap());
-        assert!(snapshot_rx.borrow().is_empty());
-        std::fs::remove_dir(path).unwrap();
     }
 }

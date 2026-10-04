@@ -36,13 +36,13 @@ DomainはTOMLやHTTPクライアントといった保存・通信手段を選び
 - `TomlChangeHistoryRepository`: 内容が変わった時の新旧本文を別のTOMLファイルへ保存します。
 - `change_history_writer`: 巡回から届く変更履歴batchを保存し、再試行とスナップショット更新を行います。キューが閉じた後は残りのbatchを処理して終了します。
 - `TomlFileProxy`: TOMLファイルをメモリ上のキャッシュと同期します。
-- `web`: HTTPの状態・履歴API、WebSocket通知、組み込みWebUIを提供します。アプリケーションから受け取ったwatch/broadcastのスナップショットを読み出し、保存処理には依存しません。
+- `web`: HTTPの状態・履歴API、WebSocket通知、組み込みWebUIを提供します。アプリケーション通知をJSON化してbroadcastへ中継し、watch/broadcastのスナップショットを読み出します。保存処理には依存しません。
 - `HttpPoller`: HTTPでHTMLを取得し、CSSセレクターによるCPU処理をブロッキング用スレッドプールで実行します。
 - `PlaywrightPoller`: Fullモードの初回巡回時にPlaywrightとChromiumを初期化・準備し、DOM要素のテキストを取得します。初期化に失敗した場合、その失敗はキャッシュせず後続の巡回で再試行します。ページ数を同時実行数と結果キュー容量の上限に使い、結果の消費が遅い場合は巡回側も待機します。結果ストリームが破棄されると生成タスクも停止します。Simpleモードだけを使う場合はブラウザーを起動・準備しません。
 
 ### Composition root — `src/main.rs`
 
-CLI引数を解釈し、TOMLリポジトリと2種類のpollerを生成して`App`へ渡します。`infrastructure::web`へ状態・変更履歴スナップショットを渡してWebサーバーを組み立て、`--web-listen`で指定したアドレスでHTTPとWebSocketを待ち受けます。履歴書き込みタスクもInfrastructureへ委譲して起動し、終了時に完了を待ちます。終了要求（`q`、標準入力EOF、Ctrl-C、Unix系OSのSIGTERM）を受けると、現在の巡回と保存を終え、通知・履歴タスクの終了を待ちます。
+CLI引数を解釈し、TOMLリポジトリと2種類のpollerを生成して`App`へ渡します。`infrastructure::web`へ状態・変更履歴スナップショットを渡してWebサーバーを組み立て、`--web-listen`で指定したアドレスでHTTPとWebSocketを待ち受けます。履歴書き込みタスクもInfrastructureへ委譲して起動し、終了時に完了を待ちます。終了要求（`q`、標準入力EOF、Ctrl-C、Unix系OSのSIGTERM）を受けると、現在の巡回と保存を終え、通知中継と履歴書き込みの完了を待ちます。その後WebSocketへcloseを送り、HTTPサーバー終了を最大5秒待ちます。巡回アプリ、Webサーバー、通知中継、履歴書き込みの各taskがエラー終了した場合は、終了処理の完了後にエラーをプロセス終了結果へ反映します。通知中継または履歴書き込みtaskの予期しない終了は稼働中にも監視し、異常を検知すると巡回アプリへ終了要求を送ります。
 
 ## 巡回の流れ
 
