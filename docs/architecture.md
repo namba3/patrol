@@ -62,4 +62,4 @@ CLI引数を解釈し、TOMLリポジトリと2種類のpollerを生成して`Ap
 - 内容が変わった時の新旧本文は`history.toml`へ別途保存し、`GET /api/v1/history`とWebUIから参照します。全体で既定100件（`--history-limit`で1〜1000件）、本文ごとに4 KiBまでに制限します。初回導入前の本文は保存されていません。
 - `mode`を省略した設定はFullとして扱われます。
 - Simpleモードは静的HTML取得向けで、ブラウザー上でのJavaScript実行はしません。
-- `src/lib.rs`がnightly featureを有効にしているため、nightly Rustが必要です。
+- Rust 2024 editionを使い、Rust 1.89以降のstable toolchainでビルドします。

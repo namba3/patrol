@@ -338,14 +338,14 @@ async fn next_broadcast_message(rx: &mut broadcast::Receiver<String>) -> Option<
 mod tests {
     use super::{
         history_handler, next_broadcast_message, next_websocket_input, run_notification_relay,
-        send_websocket_message, status_handler, web_ui, HistoryFilter, WebAppState,
-        WebSocketFilter, WebSocketInput, WebSocketSend,
+        send_websocket_message, status_handler, web_ui, ChangeHistoryPage, HistoryFilter,
+        WebAppState, WebSocketFilter, WebSocketInput, WebSocketSend,
     };
     use crate::{
         application::app::{DocStatus, DocUpdateEvent, DocUpdateInfo},
         infrastructure::ChangeHistoryEntry,
     };
-    use axum::{extract::Query, Extension};
+    use axum::{extract::Query, response::Response, Extension};
     use std::sync::Arc;
     use tokio::sync::{broadcast, mpsc, watch};
 
@@ -439,15 +439,17 @@ mod tests {
             },
         ]);
 
-        let page = history_page(history_handler(
-            Query(HistoryFilter {
-                id: Some("page".into()),
-                limit: Some(1),
-                offset: Some(1),
-            }),
-            Extension(state.clone()),
+        let page = history_page(
+            history_handler(
+                Query(HistoryFilter {
+                    id: Some("page".into()),
+                    limit: Some(1),
+                    offset: Some(1),
+                }),
+                Extension(state.clone()),
+            )
+            .await,
         )
-        .await)
         .await;
 
         assert_eq!(page.total, 2);
@@ -457,57 +459,65 @@ mod tests {
         assert!(page.has_newer);
         assert!(!page.has_older);
 
-        let minimum_page = history_page(history_handler(
-            Query(HistoryFilter {
-                id: Some("page".into()),
-                limit: Some(0),
-                offset: Some(0),
-            }),
-            Extension(state.clone()),
+        let minimum_page = history_page(
+            history_handler(
+                Query(HistoryFilter {
+                    id: Some("page".into()),
+                    limit: Some(0),
+                    offset: Some(0),
+                }),
+                Extension(state.clone()),
+            )
+            .await,
         )
-        .await)
         .await;
         assert_eq!(minimum_page.limit, 1);
         assert_eq!(minimum_page.entries[0].timestamp_unix_ms, 3);
         assert!(minimum_page.has_older);
 
-        let maximum_page = history_page(history_handler(
-            Query(HistoryFilter {
-                id: Some("page".into()),
-                limit: Some(usize::MAX),
-                offset: Some(0),
-            }),
-            Extension(state.clone()),
+        let maximum_page = history_page(
+            history_handler(
+                Query(HistoryFilter {
+                    id: Some("page".into()),
+                    limit: Some(usize::MAX),
+                    offset: Some(0),
+                }),
+                Extension(state.clone()),
+            )
+            .await,
         )
-        .await)
         .await;
         assert_eq!(maximum_page.limit, 100);
         assert_eq!(maximum_page.entries.len(), 2);
 
-        let out_of_range_page = history_page(history_handler(
-            Query(HistoryFilter {
-                id: Some("page".into()),
-                limit: Some(1),
-                offset: Some(usize::MAX),
-            }),
-            Extension(state.clone()),
+        let out_of_range_page = history_page(
+            history_handler(
+                Query(HistoryFilter {
+                    id: Some("page".into()),
+                    limit: Some(1),
+                    offset: Some(usize::MAX),
+                }),
+                Extension(state.clone()),
+            )
+            .await,
         )
-        .await)
         .await;
         assert_eq!(out_of_range_page.offset, 1);
         assert_eq!(out_of_range_page.entries[0].timestamp_unix_ms, 1);
         assert!(out_of_range_page.has_newer);
         assert!(!out_of_range_page.has_older);
 
-        let unaligned_end_page = history_page(history_handler(
-            Query(HistoryFilter {
-                limit: Some(2),
-                offset: Some(usize::MAX),
-                ..HistoryFilter::default()
-            }),
-            Extension(state.clone()),
+        let unaligned_end_page = history_page(
+            history_handler(
+                Query(HistoryFilter {
+                    limit: Some(2),
+                    offset: Some(usize::MAX),
+                    ..HistoryFilter::default()
+                }),
+                Extension(state.clone()),
+            )
+            .await,
         )
-        .await)
         .await;
         assert_eq!(unaligned_end_page.total, 3);
         assert_eq!(unaligned_end_page.offset, 2);
@@ -516,15 +526,17 @@ mod tests {
         assert!(unaligned_end_page.has_newer);
         assert!(!unaligned_end_page.has_older);
 
-        let empty_page = history_page(history_handler(
-            Query(HistoryFilter {
-                id: Some("missing".into()),
-                offset: Some(usize::MAX),
-                ..HistoryFilter::default()
-            }),
-            Extension(state),
+        let empty_page = history_page(
+            history_handler(
+                Query(HistoryFilter {
+                    id: Some("missing".into()),
+                    offset: Some(usize::MAX),
+                    ..HistoryFilter::default()
+                }),
+                Extension(state),
+            )
+            .await,
         )
-        .await)
         .await;
         assert!(empty_page.entries.is_empty());
         assert_eq!(empty_page.offset, 0);

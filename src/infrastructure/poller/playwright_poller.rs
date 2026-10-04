@@ -3,17 +3,13 @@ use std::{future::Future, time::Duration};
 
 use futures_util::{stream, Stream, StreamExt};
 use log::debug;
-use playwright::{
-    api::{BrowserContext, Page},
-    Playwright,
-};
+use playwright_rs::{install_browsers, BrowserContext, Error as PlaywrightError, Page, Playwright};
 
-use crate::domain::{Config, Id, Poller};
+use crate::domain::{Config, Id, PollStream, Poller};
 use crate::infrastructure::poller::normalize_whitespace;
 
 use tokio::sync::OnceCell;
 
-static PLAYWRIGHT: OnceCell<Playwright> = OnceCell::const_new();
 const BROWSER_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug)]
@@ -35,7 +31,7 @@ impl PlaywrightPoller {
 #[async_trait::async_trait]
 impl Poller for PlaywrightPoller {
     type Error = Error;
-    type Stream = impl Stream<Item = (Id, Result<String, Self::Error>)>;
+    type Stream = PollStream<Error>;
 
     async fn poll(&mut self, _id: Id, config: Config) -> Result<String, Self::Error> {
         let Config {
@@ -116,7 +112,7 @@ impl Poller for PlaywrightPoller {
                 .await;
         });
 
-        stream_with_producer(producer, rx)
+        Box::pin(stream_with_producer(producer, rx))
     }
 }
 
@@ -161,24 +157,19 @@ where
 struct ClientPool {
     lending_tabs: std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<Page>>>,
     returning_tabs: tokio::sync::mpsc::UnboundedSender<Page>,
+    _playwright: Arc<Playwright>,
     _context: Arc<BrowserContext>,
 }
 impl ClientPool {
     async fn new(pool_size: u8) -> Result<Self, Error> {
         let (returning_tabs, lending_tabs) = tokio::sync::mpsc::unbounded_channel();
 
-        let playwright = PLAYWRIGHT
-            .get_or_try_init(|| async {
-                Playwright::initialize()
-                    .await
-                    .map_err(|error| Error::PlaywrightError(Arc::new(error)))
-            })
-            .await?;
+        install_browsers(Some(&["chromium"])).await?;
+        let playwright = Arc::new(Playwright::launch().await?);
 
-        playwright.install_chromium()?;
         let chromium = playwright.chromium();
-        let browser = chromium.launcher().headless(true).launch().await?;
-        let context = browser.context_builder().build().await?;
+        let browser = chromium.launch().await?;
+        let context = browser.new_context().await?;
 
         for _ in 0..pool_size {
             let tab = context.new_page().await?;
@@ -188,6 +179,7 @@ impl ClientPool {
         let r = Self {
             lending_tabs: std::sync::Arc::new(tokio::sync::Mutex::new(lending_tabs)),
             returning_tabs,
+            _playwright: playwright,
             _context: Arc::new(context),
         };
 
@@ -226,7 +218,7 @@ async fn poll(
     exclude_selectors: &[crate::domain::Selector],
     normalize: bool,
 ) -> Result<String, Error> {
-    let navigation = async { page.goto_builder(url).goto().await.map_err(Error::from) };
+    let navigation = async { page.goto(url, None).await.map_err(Error::from) };
     let _resp = with_timeout(navigation, BROWSER_OPERATION_TIMEOUT)
         .await?
         .ok_or(Error::Unknown)?;
@@ -237,28 +229,30 @@ async fn poll(
     //     .await?
     //     .ok_or(Error::Unknown)?;
 
-    let fut = page.wait_for_selector_builder(selector).wait_for_selector();
-
     match wait_seconds {
         Some(x) if 0 < x => tokio::time::sleep(std::time::Duration::from_secs(x as u64)).await,
         _ => (),
     }
 
-    let selector_wait = async { fut.await.map_err(Error::from) };
-    let elem = with_timeout(selector_wait, BROWSER_OPERATION_TIMEOUT)
-        .await?
-        .ok_or(Error::Unknown)?;
+    let selector_wait = async {
+        page.locator(selector)
+            .wait_for(None)
+            .await
+            .map_err(Error::from)
+    };
+    with_timeout(selector_wait, BROWSER_OPERATION_TIMEOUT).await?;
     if exclude_selectors.is_empty() {
-        return Ok(normalize_whitespace(elem.inner_text().await?, normalize));
+        let content = page.locator(selector).inner_text().await?;
+        return Ok(normalize_whitespace(content, normalize));
     }
 
     let excluded = exclude_selectors
         .iter()
-        .map(|selector| selector.as_str())
+        .map(|selector| selector.as_str().to_owned())
         .collect::<Vec<_>>();
     let content: String = page
-        .evaluate_on_selector(
-            selector,
+        .locator(selector)
+        .evaluate(
             "(element, selectors) => { const copy = element.cloneNode(true); for (const selector of selectors) copy.querySelectorAll(selector).forEach(node => node.remove()); return copy.innerText; }",
             Some(excluded),
         )
@@ -269,7 +263,7 @@ async fn poll(
 
 async fn reset_page(page: &mut Page) {
     // This prevents the browser from spinning and wasting CPU resources.
-    if let Err(error) = page.goto_builder("about:blank").goto().await {
+    if let Err(error) = page.goto("about:blank", None).await {
         debug!("failed to reset browser page: {error}");
     }
 }
@@ -284,7 +278,7 @@ where
 #[derive(Debug)]
 pub enum Error {
     IOError(std::io::Error),
-    PlaywrightError(Arc<playwright::Error>),
+    PlaywrightError(Arc<PlaywrightError>),
     Timeout(tokio::time::error::Elapsed),
     Other(String),
     Unknown,
@@ -317,9 +311,9 @@ impl From<std::io::Error> for Error {
         Error::IOError(e)
     }
 }
-impl From<Arc<playwright::Error>> for Error {
-    fn from(e: Arc<playwright::Error>) -> Self {
-        Error::PlaywrightError(e)
+impl From<PlaywrightError> for Error {
+    fn from(error: PlaywrightError) -> Self {
+        Error::PlaywrightError(Arc::new(error))
     }
 }
 impl From<tokio::time::error::Elapsed> for Error {

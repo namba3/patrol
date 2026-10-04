@@ -85,10 +85,10 @@ where
     }
 
     pub async fn get_cache_or_load(&mut self) -> Result<&T, Error> {
-        if let Some(cache) = self.cache.as_ref() {
-            return Ok(cache);
+        if self.cache.is_none() {
+            self.load().await?;
         }
-        self.load().await
+        self.cache.as_ref().ok_or(Error::CacheEmpty)
     }
 
     pub async fn save_with_data(&mut self, data: T) -> Result<(), Error> {

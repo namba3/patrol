@@ -2,11 +2,11 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::time::Duration;
 
-use futures_util::{stream, Stream, StreamExt};
+use futures_util::{stream, StreamExt};
 use reqwest::Client;
 use scraper::Html;
 
-use crate::domain::{Config, Id, Poller};
+use crate::domain::{Config, Id, PollStream, Poller};
 use crate::infrastructure::poller::normalize_whitespace;
 
 const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -32,7 +32,7 @@ impl HttpPoller {
 #[async_trait::async_trait]
 impl Poller for HttpPoller {
     type Error = Error;
-    type Stream = impl Stream<Item = (Id, Result<String, Self::Error>)>;
+    type Stream = PollStream<Error>;
 
     async fn poll(&mut self, _id: Id, config: Config) -> Result<String, Self::Error> {
         poll(&self.client, config).await
@@ -45,7 +45,7 @@ impl Poller for HttpPoller {
             async move { (id, poll(&client, config).await) }
         }));
 
-        requests.buffer_unordered(self.max_concurrent_requests)
+        Box::pin(requests.buffer_unordered(self.max_concurrent_requests))
     }
 }
 

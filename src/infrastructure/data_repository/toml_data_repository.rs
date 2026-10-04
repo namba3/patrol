@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use log::{debug, info};
+use yansi::Paint;
 
 use crate::infrastructure::toml_file_proxy::{Error, TomlFileProxy};
 
@@ -50,15 +51,9 @@ impl TomlDataRepository {
 
         if changed {
             data.last_updated = now.into();
-            info!(
-                "[{id}]: {}",
-                ansi_term::Color::Fixed(15).bold().paint("updated.")
-            );
+            info!("[{id}]: {}", "updated.".fg(yansi::Color::Fixed(15)).bold());
         } else {
-            info!(
-                "[{id}]: {}",
-                ansi_term::Color::Fixed(8).paint("not yet updated.")
-            );
+            info!("[{id}]: {}", "not yet updated.".fg(yansi::Color::Fixed(8)));
         }
         data.hash = hash.into();
 

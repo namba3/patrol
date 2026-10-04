@@ -2,10 +2,10 @@
 
 ## ビルド
 
-`src/lib.rs`がnightly専用のfeature gateを使うため、nightly toolchainでビルドします。
+Rust 1.89以降のstable toolchainでビルドします。
 
 ```sh
-cargo +nightly build --release
+cargo build --release
 ```
 
 `config.example.toml`をコピーし、巡回対象に合わせて編集します。

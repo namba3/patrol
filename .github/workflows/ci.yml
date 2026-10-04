@@ -15,24 +15,26 @@ jobs:
   checks:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      PLAYWRIGHT_SKIP_DRIVER_DOWNLOAD: "1"
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
 
-      - name: Install nightly toolchain
-        run: rustup toolchain install nightly --profile minimal --component rustfmt --component clippy
+      - name: Install stable toolchain
+        run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
 
       - name: Cache Cargo dependencies and build output
         uses: Swatinem/rust-cache@v2.9.2
 
       - name: Check formatting
-        run: cargo +nightly fmt --check
+        run: cargo +stable fmt --check
 
       - name: Run Clippy
-        run: cargo +nightly clippy --locked --all-targets --features playwright/only-for-docs-rs -- -D warnings
+        run: cargo +stable clippy --locked --all-targets -- -D warnings
 
       - name: Run tests
-        run: cargo +nightly test --locked --features playwright/only-for-docs-rs
+        run: cargo +stable test --locked
 
       - name: Build release binary
-        run: cargo +nightly build --locked --release --features playwright/only-for-docs-rs
+        run: cargo +stable build --locked --release

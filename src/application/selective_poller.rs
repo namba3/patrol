@@ -1,8 +1,8 @@
 use std::{collections::HashMap, fmt::Display};
 
-use futures_util::{Stream, StreamExt};
+use futures_util::StreamExt;
 
-use crate::domain::{Config, Id, Mode, Poller};
+use crate::domain::{Config, Id, Mode, PollStream, Poller};
 
 use crate::domain;
 
@@ -16,7 +16,6 @@ impl<FullModePoller, SimpleModePoller> SelectivePoller<FullModePoller, SimpleMod
 where
     FullModePoller: domain::Poller + Send + Sync,
     SimpleModePoller: domain::Poller + Send + Sync,
-
     FullModePoller::Stream: Send,
     SimpleModePoller::Stream: Send,
 {
@@ -33,12 +32,11 @@ impl<FullModePoller, SimpleModePoller> Poller for SelectivePoller<FullModePoller
 where
     FullModePoller: domain::Poller + Send + Sync,
     SimpleModePoller: domain::Poller + Send + Sync,
-
     FullModePoller::Stream: Send,
     SimpleModePoller::Stream: Send,
 {
     type Error = Error<FullModePoller::Error, SimpleModePoller::Error>;
-    type Stream = impl Stream<Item = (Id, Result<String, Self::Error>)>;
+    type Stream = PollStream<Error<FullModePoller::Error, SimpleModePoller::Error>>;
 
     async fn poll(&mut self, id: Id, config: Config) -> Result<String, Self::Error> {
         match config.mode {
@@ -81,7 +79,7 @@ where
             .poll_multiple(simple_mode_configs)
             .await;
 
-        async_stream::stream! {
+        Box::pin(async_stream::stream! {
             tokio::pin!(full_mode_stream);
             tokio::pin!(simple_mode_stream);
 
@@ -94,7 +92,7 @@ where
 
                 yield result;
             }
-        }
+        })
     }
 }
 

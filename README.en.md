@@ -8,10 +8,10 @@ This is a personal learning project for building an onion architecture in Rust. 
 
 ## Quick start
 
-Build with the Rust nightly toolchain.
+Build with the stable Rust toolchain (Rust 1.89 or newer).
 
 ```sh
-cargo +nightly build --release
+cargo build --release
 cp config.example.toml config.toml
 ./target/release/patrol --config-path ./config.toml --data-path ./data.toml
 ```

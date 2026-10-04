@@ -47,11 +47,11 @@
 
 ## ビルドと実行
 
-nightly toolchainが必要です。
+Rust 1.89以降のstable toolchainが必要です。
 
 ```sh
-cargo +nightly build
-cargo +nightly run -- --config-path ./config.example.toml --data-path ./data.toml --once
+cargo build
+cargo run -- --config-path ./config.example.toml --data-path ./data.toml --once
 ```
 
 `config.example.toml`のURLとセレクターはサンプル値です。実際の対象サイトでの抽出結果やブラウザー動作を確認する場合は、用途に合う設定に置き換えてください。
@@ -61,19 +61,19 @@ cargo +nightly run -- --config-path ./config.example.toml --data-path ./data.tom
 通常のテストとRustコードの書式チェックは次のコマンドで実行します。
 
 ```sh
-cargo +nightly test
-cargo +nightly fmt --check
+cargo test
+cargo fmt --check
 ```
 
-Playwright依存crateはビルド時にブラウザードライバーを取得します。ブラウザーを起動しないユニットテストだけを実行する場合は、次のfeatureを指定するとドライバー取得を省略できます。
+Playwright依存crateはビルド時にブラウザードライバーを取得します。ブラウザーを起動しないチェックやユニットテストでは、環境変数を設定してドライバー取得を省略できます。
 
 ```sh
-cargo +nightly test --features playwright/only-for-docs-rs
+PLAYWRIGHT_SKIP_DRIVER_DOWNLOAD=1 cargo test
 ```
 
-このfeatureを使った実行はRust側のユニットテスト用です。Chromiumの起動、ページ遷移、実サイトからの抽出動作は検証しません。
+この環境変数を使った実行はRust側のチェック・ユニットテスト用です。Chromiumの起動、ページ遷移、実サイトからの抽出動作は検証しません。通常の実行ではビルド時にドライバーを取得し、Fullモードの初回起動時にChromiumをインストールします。
 
-GitHub Actionsの`.github/workflows/ci.yml`は、pushとpull requestで書式チェック、Clippy、テスト、releaseビルドを実行します。CIも同じdocs-rs featureを使うため、実ブラウザーの起動は確認しません。
+GitHub Actionsの`.github/workflows/ci.yml`は、pushとpull requestで書式チェック、Clippy、テスト、releaseビルドを実行します。CIではドライバー取得を省略するため、実ブラウザーの起動は確認しません。
 
 ## 資料の更新
 

@@ -8,10 +8,10 @@
 
 ## クイックスタート
 
-Rustのnightly toolchainでビルドします。
+Rust 1.89以降のstable toolchainでビルドします。
 
 ```sh
-cargo +nightly build --release
+cargo build --release
 cp config.example.toml config.toml
 ./target/release/patrol --config-path ./config.toml --data-path ./data.toml
 ```

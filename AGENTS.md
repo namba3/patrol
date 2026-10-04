@@ -2,7 +2,7 @@
 
 ## Project shape
 
-- This is a Rust 2021 project that currently requires the nightly toolchain because `src/lib.rs` enables nightly features.
+- This is a Rust 2024 project with an MSRV of Rust 1.89; keep code compatible with stable Rust.
 - Keep the onion-architecture boundary: domain types and traits belong in `src/domain/`, use cases in `src/application/`, concrete I/O adapters in `src/infrastructure/`, and process wiring/CLI in `src/main.rs`.
 - Application code should depend on domain traits rather than TOML, HTTP, or Playwright implementations.
 - `DataRepository::update` returns a timestamp only when the content hash changes. Empty extracted content does not change the saved content hash, but it records a successful poll status.

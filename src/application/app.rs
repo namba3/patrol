@@ -190,7 +190,6 @@ where
     ConfigRepository: domain::ConfigRepository + Send,
     DataRepository: domain::DataRepository + Send + 'static,
     Poller: domain::Poller,
-
     ConfigRepository::Error: std::error::Error,
     DataRepository::Error: std::error::Error,
     Poller::Error: std::error::Error,
@@ -321,7 +320,9 @@ where
                 match data_repo.get_multiple(configured_ids).await {
                     Ok(data) => data,
                     Err(error) => {
-                        warn!("failed to read last-attempt times; polling all configured pages: {error}");
+                        warn!(
+                            "failed to read last-attempt times; polling all configured pages: {error}"
+                        );
                         HashMap::new()
                     }
                 }
@@ -441,17 +442,16 @@ where
                 Ok(batch) => {
                     for (id, timestamp) in batch.changed_at {
                         if let Some(timestamp) = timestamp {
-                            if tx_history.is_some() {
-                                if let Some((content, content_truncated)) =
+                            if tx_history.is_some()
+                                && let Some((content, content_truncated)) =
                                     successful_contents.remove(&id)
-                                {
-                                    history_changes.push(DocChangeContent {
-                                        id: id.to_string(),
-                                        timestamp_unix_ms: timestamp.unix_millis(),
-                                        content,
-                                        content_truncated,
-                                    });
-                                }
+                            {
+                                history_changes.push(DocChangeContent {
+                                    id: id.to_string(),
+                                    timestamp_unix_ms: timestamp.unix_millis(),
+                                    content,
+                                    content_truncated,
+                                });
                             }
                             cycle_updates.push(DocUpdateInfo {
                                 event: DocUpdateEvent::Changed,
@@ -501,20 +501,20 @@ where
                         }
                     }
 
-                    if let Some(tx_history) = &tx_history {
-                        if !history_changes.is_empty() {
-                            let (tx_persisted, rx_persisted) = oneshot::channel();
-                            if tx_history
-                                .send(DocChangeBatch {
-                                    changes: history_changes,
-                                    persisted: tx_persisted,
-                                })
-                                .await
-                                .is_err()
-                                || !matches!(rx_persisted.await, Ok(true))
-                            {
-                                warn!("change history was not confirmed as saved");
-                            }
+                    if let Some(tx_history) = &tx_history
+                        && !history_changes.is_empty()
+                    {
+                        let (tx_persisted, rx_persisted) = oneshot::channel();
+                        if tx_history
+                            .send(DocChangeBatch {
+                                changes: history_changes,
+                                persisted: tx_persisted,
+                            })
+                            .await
+                            .is_err()
+                            || !matches!(rx_persisted.await, Ok(true))
+                        {
+                            warn!("change history was not confirmed as saved");
                         }
                     }
                     for update in cycle_updates {
