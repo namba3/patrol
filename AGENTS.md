@@ -21,6 +21,7 @@
 - Preserve unrelated user changes and inspect the working tree before editing.
 - Avoid changing public contracts or persisted TOML formats unless the task calls for it; document any such change.
 - Keep edits focused on the requested scope and avoid introducing dependencies for documentation-only work.
+- For every change, consider its effects on maintainability, performance, and UI/UX, and make relevant improvements within scope. Keep the design simple, and base performance optimizations on evidence.
 
 ## Privacy and file paths
 
