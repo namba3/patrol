@@ -58,7 +58,7 @@ CLI引数を解釈し、TOMLリポジトリと2種類のpollerを生成して`Ap
 
 - 保存先はローカルのTOMLファイルです。DBや外部通知サービスの実装はありません。
 - WebSocket通知は変更・失敗・復旧のイベント配信です。接続時に`id`と`event`のクエリで通知を絞れます。履歴や初期状態をWebSocketでは配信しません。初期状態は`GET /api/v1/status`で取得できます。受信側がbroadcast容量100件分以上遅れると、その間の古いイベントを飛ばして配信を続けます。
-- `GET /api/v1/status`は最新の巡回状態スナップショットを返し、`/ui`は同じAPIとWebSocketを使う静的画面です。状態APIとWebSocketに認証はありません。
+- `GET /api/v1/status`は最新の巡回状態スナップショットを返します。`/ui`と配下のアセットはDioxus WebAssemblyバンドルを返し、画面は同じ状態・履歴APIとWebSocketを利用します。UIアセットはPatrolのビルド時に実行ファイルへ埋め込みます。状態APIとWebSocketに認証はありません。
 - 内容が変わった時の新旧本文は`history.toml`へ別途保存し、`GET /api/v1/history`とWebUIから参照します。全体で既定100件（`--history-limit`で1〜1000件）、本文ごとに4 KiBまでに制限します。初回導入前の本文は保存されていません。
 - `mode`を省略した設定はFullとして扱われます。
 - Simpleモードは静的HTML取得向けで、ブラウザー上でのJavaScript実行はしません。

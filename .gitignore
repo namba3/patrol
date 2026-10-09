@@ -1,4 +1,6 @@
 /target
+/ui/target
+/web/dist
 config.toml
 data.toml
 history.toml

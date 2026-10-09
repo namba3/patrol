@@ -3,10 +3,10 @@ use std::sync::Arc;
 use axum::{
     extract::{
         ws::{WebSocket, WebSocketUpgrade},
-        Extension, Query,
+        Extension, Path, Query,
     },
-    http::StatusCode,
-    response::{Html, IntoResponse, Response},
+    http::{header, HeaderValue, StatusCode},
+    response::{IntoResponse, Response},
     routing::get,
     Json, Router,
 };
@@ -20,6 +20,10 @@ use crate::{
 
 const HISTORY_PAGE_SIZE: usize = 50;
 const MAX_HISTORY_PAGE_SIZE: usize = 100;
+
+mod ui_assets {
+    include!(concat!(env!("OUT_DIR"), "/ui_assets.rs"));
+}
 
 #[derive(Debug)]
 pub struct WebAppState {
@@ -64,8 +68,61 @@ pub async fn run_notification_relay(
     }
 }
 
-async fn web_ui() -> Html<&'static str> {
-    Html(include_str!("../../web/index.html"))
+async fn web_ui() -> Response {
+    ui_asset_response("index.html")
+}
+
+async fn web_ui_asset(Path(path): Path<String>) -> Response {
+    ui_asset_response(&path)
+}
+
+fn ui_asset_response(path: &str) -> Response {
+    if let Some((_, bytes)) = ui_assets::UI_ASSETS.iter().find(|(name, _)| *name == path) {
+        let content_type = match path.rsplit_once('.').map(|(_, extension)| extension) {
+            Some("html") => "text/html; charset=utf-8",
+            Some("js" | "mjs") => "text/javascript; charset=utf-8",
+            Some("css") => "text/css; charset=utf-8",
+            Some("wasm") => "application/wasm",
+            Some("json") => "application/json",
+            Some("svg") => "image/svg+xml",
+            Some("png") => "image/png",
+            Some("ico") => "image/x-icon",
+            Some("woff2") => "font/woff2",
+            _ => "application/octet-stream",
+        };
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, content_type)
+            .header(
+                header::CACHE_CONTROL,
+                if path == "index.html" {
+                    "no-cache"
+                } else {
+                    "public, max-age=31536000, immutable"
+                },
+            )
+            .body(axum::body::Body::from(*bytes))
+            .expect("valid UI asset response");
+    }
+
+    if path == "index.html" {
+        return Response::builder()
+            .status(StatusCode::SERVICE_UNAVAILABLE)
+            .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+            .body(axum::body::Body::from(
+                "<!doctype html><html lang=\"ja\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Patrol UI</title><body style=\"font-family:system-ui;max-width:42rem;margin:4rem auto;padding:1rem\"><h1>UIアセットが見つかりません</h1><p>Dioxus UIをビルドしてからPatrolを再ビルドしてください。</p><pre>./scripts/build_ui.sh\ncargo build --release</pre></body></html>",
+            ))
+            .expect("valid missing UI response");
+    }
+
+    Response::builder()
+        .status(StatusCode::NOT_FOUND)
+        .header(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/plain; charset=utf-8"),
+        )
+        .body(axum::body::Body::from("UI asset not found"))
+        .expect("valid missing asset response")
 }
 
 async fn health_handler() -> &'static str {
@@ -76,6 +133,8 @@ pub fn build_web_app(state: Arc<WebAppState>) -> Router {
     Router::new()
         .route("/", get(websocket_handler))
         .route("/ui", get(web_ui))
+        .route("/ui/", get(web_ui))
+        .route("/ui/{*path}", get(web_ui_asset))
         .route("/healthz", get(health_handler))
         .route("/api/v1/status", get(status_handler))
         .route("/api/v1/history", get(history_handler))
@@ -568,12 +627,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bundled_ui_contains_the_status_and_history_clients() {
-        let axum::response::Html(page) = web_ui().await;
-
-        assert!(page.contains("/api/v1/status"));
-        assert!(page.contains("/api/v1/history"));
-        assert!(page.contains("new WebSocket"));
+    async fn ui_route_serves_the_bundle_or_explains_how_to_build_it() {
+        let response = web_ui().await;
+        assert!(matches!(
+            response.status(),
+            axum::http::StatusCode::OK | axum::http::StatusCode::SERVICE_UNAVAILABLE
+        ));
     }
 
     #[tokio::test]

@@ -1,0 +1,15 @@
+[application]
+name = "patrol-ui"
+default_platform = "web"
+out_dir = "../web/dist"
+asset_dir = "assets"
+
+[web.app]
+title = "Patrol"
+base_path = "ui"
+
+[web.resource]
+style = []
+
+[web.resource.dev]
+style = []

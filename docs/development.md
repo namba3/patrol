@@ -47,12 +47,19 @@
 
 ## ビルドと実行
 
-Rust 1.89以降のstable toolchainが必要です。
+UIの翻訳はui/locales/のJSONカタログで管理します。UIソース、翻訳、またはCSSを変更したら、Patrol本体の再ビルド前に./scripts/build_ui.shを実行してください。
+
+Rust 1.89以降のstable toolchainとDioxus CLI 0.7.10が必要です。UIを変更した場合は、Patrol本体のビルド前にDioxus UIを再バンドルしてください。
 
 ```sh
+rustup target add wasm32-unknown-unknown
+cargo install dioxus-cli --version 0.7.10 --locked
+./scripts/build_ui.sh
 cargo build
 cargo run -- --config-path ./config.example.toml --data-path ./data.toml --once
 ```
+
+フロントエンドは`ui/`に置き、`./scripts/build_ui.sh`が生成したWebアセットをルートの`build.rs`が本体へ埋め込みます。UIソースまたはCSSを変更したらこのスクリプトを実行してからPatrolを再ビルドします。生成物は`web/dist/`と`ui/target/`に置き、Gitへ含めません。UIをバンドルせずに本体だけを起動すると、`/ui`にはビルド手順を案内するページが表示されます。
 
 `config.example.toml`のURLとセレクターはサンプル値です。実際の対象サイトでの抽出結果やブラウザー動作を確認する場合は、用途に合う設定に置き換えてください。
 

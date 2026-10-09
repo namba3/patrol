@@ -8,9 +8,12 @@
 
 ## クイックスタート
 
-Rust 1.89以降のstable toolchainでビルドします。
+Rust 1.89以降のstable toolchainとDioxus CLI 0.7.10でビルドします。詳細は[利用方法](docs/usage.md)を参照してください。
 
 ```sh
+rustup target add wasm32-unknown-unknown
+cargo install dioxus-cli --version 0.7.10 --locked
+./scripts/build_ui.sh
 cargo build --release
 cp config.example.toml config.toml
 ./target/release/patrol --config-path ./config.toml --data-path ./data.toml
