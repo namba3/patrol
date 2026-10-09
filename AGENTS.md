@@ -27,3 +27,8 @@
 - Do not commit personal information, credentials, or other private data. Use clearly fictional examples or placeholders when examples are needed.
 - Do not include machine-specific absolute file paths in repository files, documentation, examples, or logs. Prefer repository-relative paths or portable commands.
 - When personal information or an absolute file path is found, remove it or replace it with a non-identifying placeholder, and check nearby content for related disclosures before committing.
+
+## Code Review
+
+When performing a code review, read and follow [REVIEW.md](./REVIEW.md).
+These guidelines apply only to review tasks; regular development work follows the instructions in this file.
