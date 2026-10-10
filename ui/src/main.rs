@@ -1,6 +1,7 @@
 #![allow(non_snake_case)]
 
 use dioxus::prelude::*;
+use fluent_bundle::{FluentArgs, FluentBundle, FluentResource};
 use futures_util::StreamExt;
 use gloo_net::{
     http::Request,
@@ -8,7 +9,8 @@ use gloo_net::{
 };
 use gloo_timers::future::TimeoutFuture;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::OnceLock};
+use std::cell::RefCell;
+use unic_langid::LanguageIdentifier;
 
 const STATUS_VIEW_STORAGE_KEY: &str = "patrol.status-view.v1";
 const LANGUAGE_STORAGE_KEY: &str = "patrol.language.v1";
@@ -74,28 +76,18 @@ enum ApiError {
     InvalidResponse,
 }
 
-#[derive(Deserialize)]
-struct Catalog {
-    #[serde(flatten)]
-    messages: HashMap<String, MessageValue>,
-}
+type UiBundle = FluentBundle<FluentResource>;
 
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum MessageValue {
-    Text(String),
-    Plural(PluralForms),
+thread_local! {
+    static JA_BUNDLE: RefCell<UiBundle> = RefCell::new(make_bundle(
+        "ja-JP",
+        include_str!("../locales/ja.ftl"),
+    ));
+    static EN_BUNDLE: RefCell<UiBundle> = RefCell::new(make_bundle(
+        "en-US",
+        include_str!("../locales/en.ftl"),
+    ));
 }
-
-#[derive(Deserialize)]
-struct PluralForms {
-    zero: Option<String>,
-    one: Option<String>,
-    other: String,
-}
-
-static JA_CATALOG: OnceLock<Catalog> = OnceLock::new();
-static EN_CATALOG: OnceLock<Catalog> = OnceLock::new();
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct StatusView {
@@ -120,32 +112,15 @@ fn main() {
     dioxus::launch(app);
 }
 
-fn japanese_catalog() -> &'static Catalog {
-    JA_CATALOG.get_or_init(|| {
-        serde_json::from_str(include_str!("../locales/ja.json"))
-            .expect("Japanese message catalog is valid JSON")
-    })
-}
-
-fn english_catalog() -> &'static Catalog {
-    EN_CATALOG.get_or_init(|| {
-        serde_json::from_str(include_str!("../locales/en.json"))
-            .expect("English message catalog is valid JSON")
-    })
-}
-
-fn message_value(locale: &str, key: &str) -> Option<(&'static MessageValue, &'static str)> {
-    let english = english_catalog();
-    let (selected, selected_locale) = if locale == "ja" {
-        (japanese_catalog(), "ja")
-    } else {
-        (english, "en")
-    };
-    if let Some(message) = selected.messages.get(key) {
-        Some((message, selected_locale))
-    } else {
-        english.messages.get(key).map(|message| (message, "en"))
-    }
+fn make_bundle(locale: &str, source: &str) -> UiBundle {
+    let locale: LanguageIdentifier = locale.parse().expect("UI locale is valid");
+    let mut bundle = FluentBundle::new(vec![locale]);
+    let resource = FluentResource::try_new(source.to_owned())
+        .unwrap_or_else(|(_, errors)| panic!("UI Fluent catalog is invalid: {errors:?}"));
+    bundle
+        .add_resource(resource)
+        .expect("UI Fluent catalog has no duplicate message IDs");
+    bundle
 }
 
 fn missing_message(key: &str) -> String {
@@ -159,76 +134,62 @@ fn missing_message(key: &str) -> String {
     }
 }
 
-fn message_template(value: &MessageValue) -> &str {
-    match value {
-        MessageValue::Text(message) => message,
-        MessageValue::Plural(forms) => &forms.other,
-    }
-}
-
 fn tr(locale: &str, key: &str) -> String {
     tr_args(locale, key, &[])
 }
 
 fn tr_args(locale: &str, key: &str, args: &[(&str, String)]) -> String {
-    let Some((value, _resolved_locale)) = message_value(locale, key) else {
-        return missing_message(key);
-    };
-    interpolate(message_template(value), args)
+    let mut fluent_args = FluentArgs::new();
+    for (name, value) in args {
+        fluent_args.set(*name, value.as_str());
+    }
+    format_message(locale, key, Some(&fluent_args)).unwrap_or_else(|| missing_message(key))
 }
 
 fn tr_count(locale: &str, key: &str, count: usize, args: &[(&str, String)]) -> String {
-    let Some((value, resolved_locale)) = message_value(locale, key) else {
-        return missing_message(key);
-    };
-    let template = match value {
-        MessageValue::Text(message) => message.as_str(),
-        MessageValue::Plural(forms) if count == 0 => forms.zero.as_deref().unwrap_or(&forms.other),
-        MessageValue::Plural(forms) if resolved_locale != "ja" && count == 1 => {
-            forms.one.as_deref().unwrap_or(&forms.other)
-        }
-        MessageValue::Plural(forms) => &forms.other,
-    };
-    let mut all_args = Vec::with_capacity(args.len() + 1);
-    all_args.push(("count", format_number(count, locale)));
-    all_args.extend(args.iter().cloned());
-    interpolate(template, &all_args)
+    let mut fluent_args = FluentArgs::new();
+    fluent_args.set("count", count as i64);
+    fluent_args.set("count-display", format_number(count, locale));
+    for (name, value) in args {
+        fluent_args.set(*name, value.as_str());
+    }
+    format_message(locale, key, Some(&fluent_args)).unwrap_or_else(|| missing_message(key))
 }
 
-fn interpolate(template: &str, args: &[(&str, String)]) -> String {
-    let mut output = String::with_capacity(template.len());
-    let mut remaining = template;
-    while let Some(open) = remaining.find('{') {
-        output.push_str(&remaining[..open]);
-        let after_open = &remaining[open + 1..];
-        let Some(close) = after_open.find('}') else {
-            output.push_str(&remaining[open..]);
-            return output;
-        };
-        let key = &after_open[..close];
-        if let Some((_, value)) = args.iter().find(|(name, _)| *name == key) {
-            output.push_str(value);
-        } else {
-            output.push('{');
-            output.push_str(key);
-            output.push('}');
-        }
-        remaining = &after_open[close + 1..];
-    }
-    output.push_str(remaining);
-    output
+fn format_message(locale: &str, key: &str, args: Option<&FluentArgs<'_>>) -> Option<String> {
+    let selected = if locale == "ja" {
+        JA_BUNDLE.with(|bundle| format_from_bundle(&bundle.borrow(), key, args))
+    } else {
+        EN_BUNDLE.with(|bundle| format_from_bundle(&bundle.borrow(), key, args))
+    };
+    selected.or_else(|| EN_BUNDLE.with(|bundle| format_from_bundle(&bundle.borrow(), key, args)))
+}
+
+fn format_from_bundle(
+    bundle: &UiBundle,
+    key: &str,
+    args: Option<&FluentArgs<'_>>,
+) -> Option<String> {
+    let message = bundle.get_message(key)?;
+    let pattern = message.value()?;
+    let mut errors = Vec::new();
+    Some(
+        bundle
+            .format_pattern(pattern, args, &mut errors)
+            .into_owned(),
+    )
 }
 
 fn api_error_message(locale: &str, error: &ApiError) -> String {
     match error {
-        ApiError::Timeout => tr(locale, "api.timeout"),
+        ApiError::Timeout => tr(locale, "api-timeout"),
         ApiError::Http(status) => tr_args(
             locale,
-            "api.http_error",
+            "api-http_error",
             &[("status", format_number(*status as usize, locale))],
         ),
-        ApiError::Request => tr(locale, "api.request_error"),
-        ApiError::InvalidResponse => tr(locale, "api.invalid_response"),
+        ApiError::Request => tr(locale, "api-request_error"),
+        ApiError::InvalidResponse => tr(locale, "api-invalid_response"),
     }
 }
 
@@ -426,27 +387,27 @@ fn app() -> Element {
                     div { class: "brand-mark", "P" }
                     div {
                         h1 { "Patrol" }
-                        p { "{tr(&current_locale, \"app.subtitle\")}" }
+                        p { "{tr(&current_locale, \"app-subtitle\")}" }
                     }
                 }
                 div { class: "top-actions",
                     span { class: status_connection_class, role: "status", aria_live: "polite",
                         if let Some(error) = status_error_text.clone() {
-                            "{tr_args(&current_locale, \"connection.api_failed\", &[(\"error\", error)])}"
+                            "{tr_args(&current_locale, \"connection-api_failed\", &[(\"error\", error.clone())])}"
                         } else if socket_connected() {
-                            "{tr(&current_locale, \"connection.realtime_connected\")}"
+                            "{tr(&current_locale, \"connection-realtime_connected\")}"
                         } else {
-                            "{tr(&current_locale, \"connection.reconnecting\")}"
+                            "{tr(&current_locale, \"connection-reconnecting\")}"
                         }
                     }
                     label { class: "language-picker",
-                        span { class: "sr-only", "{tr(&current_locale, \"language.label\")}" }
+                        span { class: "sr-only", "{tr(&current_locale, \"language-label\")}" }
                         select {
-                            aria_label: "{tr(&current_locale, \"language.label\")}",
+                            aria_label: "{tr(&current_locale, \"language-label\")}",
                             value: "{current_locale}",
                             onchange: move |event| locale.set(event.value()),
-                            option { value: "ja", "{tr(&current_locale, \"language.japanese\")}" }
-                            option { value: "en", "{tr(&current_locale, \"language.english\")}" }
+                            option { value: "ja", "{tr(&current_locale, \"language-japanese\")}" }
+                            option { value: "en", "{tr(&current_locale, \"language-english\")}" }
                         }
                     }
                     button {
@@ -465,22 +426,22 @@ fn app() -> Element {
                                 }
                             }
                         }); },
-                        "{tr(&current_locale, \"action.refresh_now\")}"
+                        "{tr(&current_locale, \"action-refresh_now\")}"
                     }
                 }
             }
 
-            section { class: "stats", aria_label: "{tr(&current_locale, \"summary.title\")}",
+            section { class: "stats", aria_label: "{tr(&current_locale, \"summary-title\")}",
                 div { class: "stat",
-                    div { class: "stat-label", "{tr(&current_locale, \"summary.registered_targets\")}" }
+                    div { class: "stat-label", "{tr(&current_locale, \"summary-registered_targets\")}" }
                     div { class: "stat-value", "{format_number(all_statuses.len(), &current_locale)}" }
                 }
                 div { class: "stat",
-                    div { class: "stat-label", "{tr(&current_locale, \"summary.healthy\")}" }
+                    div { class: "stat-label", "{tr(&current_locale, \"summary-healthy\")}" }
                     div { class: "stat-value good", "{format_number(ok_count, &current_locale)}" }
                 }
                 div { class: "stat",
-                    div { class: "stat-label", "{tr(&current_locale, \"summary.needs_attention\")}" }
+                    div { class: "stat-label", "{tr(&current_locale, \"summary-needs_attention\")}" }
                     div { class: "stat-value bad", "{format_number(failed_count + unchecked_count, &current_locale)}" }
                 }
             }
@@ -490,14 +451,14 @@ fn app() -> Element {
                     article { class: "card",
                         header { class: "card-head",
                             div {
-                                h2 { "{tr(&current_locale, \"targets.title\")}" }
+                                h2 { "{tr(&current_locale, \"targets-title\")}" }
                                 p {
                                     if let Some(timestamp) = last_updated() {
-                                        "{tr_args(&current_locale, \"targets.last_updated\", &[(\"time\", format_time(Some(timestamp), &current_locale))])}"
+                                        "{tr_args(&current_locale, \"targets-last_updated\", &[(\"time\", format_time(Some(timestamp), &current_locale))])}"
                                     } else if let Some(error) = status_error_text.clone() {
-                                        "{tr_args(&current_locale, \"targets.fetch_error\", &[(\"error\", error)])}"
+                                        "{tr_args(&current_locale, \"targets-fetch_error\", &[(\"error\", error.clone())])}"
                                     } else {
-                                        "{tr(&current_locale, \"targets.loading\")}"
+                                        "{tr(&current_locale, \"targets-loading\")}"
                                     }
                                 }
                             }
@@ -505,7 +466,7 @@ fn app() -> Element {
                                 class: "quiet",
                                 disabled: visible_status_count == 0,
                                 onclick: move |_| download_csv("patrol-status.csv", &status_csv_content),
-                                "{tr(&current_locale, \"targets.export_csv\")}"
+                                "{tr(&current_locale, \"targets-export_csv\")}"
                             }
                         }
                         div { class: "card-body",
@@ -513,40 +474,40 @@ fn app() -> Element {
                                 input {
                                     class: "search",
                                     r#type: "search",
-                                    placeholder: "{tr(&current_locale, \"targets.search_placeholder\")}",
+                                    placeholder: "{tr(&current_locale, \"targets-search_placeholder\")}",
                                     value: "{view.search}",
                                     oninput: move |event| status_view.with_mut(|view| view.search = event.value()),
                                 }
                                 select {
-                                    aria_label: "{tr(&current_locale, \"filter.status_label\")}",
+                                    aria_label: "{tr(&current_locale, \"filter-status_label\")}",
                                     value: "{view.status}",
                                     onchange: move |event| status_view.with_mut(|view| view.status = event.value()),
-                                    option { value: "", "{tr(&current_locale, \"filter.status.all\")}" }
-                                    option { value: "ok", "{tr(&current_locale, \"filter.status.ok\")}" }
-                                    option { value: "failed", "{tr(&current_locale, \"filter.status.failed\")}" }
-                                    option { value: "not_checked", "{tr(&current_locale, \"filter.status.not_checked\")}" }
+                                    option { value: "", "{tr(&current_locale, \"filter-status-all\")}" }
+                                    option { value: "ok", "{tr(&current_locale, \"filter-status-ok\")}" }
+                                    option { value: "failed", "{tr(&current_locale, \"filter-status-failed\")}" }
+                                    option { value: "not_checked", "{tr(&current_locale, \"filter-status-not_checked\")}" }
                                 }
                                 select {
-                                    aria_label: "{tr(&current_locale, \"filter.sort_label\")}",
+                                    aria_label: "{tr(&current_locale, \"filter-sort_label\")}",
                                     value: "{view.sort}",
                                     onchange: move |event| status_view.with_mut(|view| view.sort = event.value()),
-                                    option { value: "id", "{tr(&current_locale, \"filter.sort.id\")}" }
-                                    option { value: "status", "{tr(&current_locale, \"filter.sort.status\")}" }
-                                    option { value: "last_attempted", "{tr(&current_locale, \"filter.sort.last_attempted\")}" }
-                                    option { value: "last_updated", "{tr(&current_locale, \"filter.sort.last_updated\")}" }
+                                    option { value: "id", "{tr(&current_locale, \"filter-sort-id\")}" }
+                                    option { value: "status", "{tr(&current_locale, \"filter-sort-status\")}" }
+                                    option { value: "last_attempted", "{tr(&current_locale, \"filter-sort-last_attempted\")}" }
+                                    option { value: "last_updated", "{tr(&current_locale, \"filter-sort-last_updated\")}" }
                                 }
                                 select {
-                                    aria_label: "{tr(&current_locale, \"filter.refresh_label\")}",
+                                    aria_label: "{tr(&current_locale, \"filter-refresh_label\")}",
                                     value: "{view.refresh_ms}",
                                     onchange: move |event| {
                                         if let Ok(value) = event.value().parse::<u32>() {
                                             status_view.with_mut(|view| view.refresh_ms = value);
                                         }
                                     },
-                                    option { value: "5000", "{tr_count(&current_locale, \"filter.refresh.seconds\", 5, &[])}" }
-                                    option { value: "15000", "{tr_count(&current_locale, \"filter.refresh.seconds\", 15, &[])}" }
-                                    option { value: "30000", "{tr_count(&current_locale, \"filter.refresh.seconds\", 30, &[])}" }
-                                    option { value: "60000", "{tr_count(&current_locale, \"filter.refresh.seconds\", 60, &[])}" }
+                                    option { value: "5000", "{tr_count(&current_locale, \"filter-refresh-seconds\", 5, &[])}" }
+                                    option { value: "15000", "{tr_count(&current_locale, \"filter-refresh-seconds\", 15, &[])}" }
+                                    option { value: "30000", "{tr_count(&current_locale, \"filter-refresh-seconds\", 30, &[])}" }
+                                    option { value: "60000", "{tr_count(&current_locale, \"filter-refresh-seconds\", 60, &[])}" }
                                 }
                                 button {
                                     class: "quiet",
@@ -557,27 +518,27 @@ fn app() -> Element {
                                             view.refresh_ms = refresh_ms;
                                         });
                                     },
-                                    "{tr(&current_locale, \"filter.reset\")}"
+                                    "{tr(&current_locale, \"filter-reset\")}"
                                 }
-                                span { class: "count", "{tr_count(&current_locale, \"targets.visible_count\", visible_status_count, &[(\"total\", format_number(all_statuses.len(), &current_locale))])}" }
+                                span { class: "count", "{tr_count(&current_locale, \"targets-visible_count\", visible_status_count, &[(\"total\", format_number(all_statuses.len(), &current_locale))])}" }
                             }
-                            div { class: "table-wrap", role: "region", aria_label: "{tr(&current_locale, \"targets.table_label\")}", tabindex: "0",
+                            div { class: "table-wrap", role: "region", aria_label: "{tr(&current_locale, \"targets-table_label\")}", tabindex: "0",
                                 table {
                                     thead { tr {
-                                        th { scope: "col", "{tr(&current_locale, \"table.target\")}" }
-                                        th { scope: "col", "{tr(&current_locale, \"table.status\")}" }
-                                        th { scope: "col", "{tr(&current_locale, \"table.last_attempted\")}" }
-                                        th { scope: "col", "{tr(&current_locale, \"table.last_success\")}" }
-                                        th { scope: "col", "{tr(&current_locale, \"table.last_change\")}" }
-                                        th { scope: "col", "{tr(&current_locale, \"table.error\")}" }
-                                        th { scope: "col", "{tr(&current_locale, \"table.history\")}" }
+                                        th { scope: "col", "{tr(&current_locale, \"table-target\")}" }
+                                        th { scope: "col", "{tr(&current_locale, \"table-status\")}" }
+                                        th { scope: "col", "{tr(&current_locale, \"table-last_attempted\")}" }
+                                        th { scope: "col", "{tr(&current_locale, \"table-last_success\")}" }
+                                        th { scope: "col", "{tr(&current_locale, \"table-last_change\")}" }
+                                        th { scope: "col", "{tr(&current_locale, \"table-error\")}" }
+                                        th { scope: "col", "{tr(&current_locale, \"table-history\")}" }
                                     } }
                                     tbody {
                                         if visible.is_empty() {
                                             tr { td { colspan: "7", class: "empty",
-                                                if status_loading() { "{tr(&current_locale, \"empty.status_loading\")}" }
-                                                else if all_statuses.is_empty() { "{tr(&current_locale, \"empty.no_targets\")}" }
-                                                else { "{tr(&current_locale, \"empty.no_filter_match\")}" }
+                                                if status_loading() { "{tr(&current_locale, \"empty-status_loading\")}" }
+                                                else if all_statuses.is_empty() { "{tr(&current_locale, \"empty-no_targets\")}" }
+                                                else { "{tr(&current_locale, \"empty-no_filter_match\")}" }
                                             } }
                                         }
                                         for status in visible {
@@ -605,47 +566,47 @@ fn app() -> Element {
                     article { class: "card",
                         header { class: "card-head",
                             div {
-                                h2 { "{tr(&current_locale, \"notification.title\")}" }
-                                p { "{tr_count(&current_locale, \"notification.latest_count\", EVENT_LIMIT, &[])}" }
+                                h2 { "{tr(&current_locale, \"notification-title\")}" }
+                                p { "{tr_count(&current_locale, \"notification-latest_count\", EVENT_LIMIT, &[])}" }
                             }
                             button {
                                 class: "quiet",
                                 disabled: current_events.is_empty(),
                                 onclick: move |_| events.set(Vec::new()),
-                                "{tr(&current_locale, \"notification.clear\")}"
+                                "{tr(&current_locale, \"notification-clear\")}"
                             }
                         }
                         div { class: "card-body",
                             div { class: "side-filters", style: "margin-bottom: 14px",
-                                label { "{tr(&current_locale, \"notification.filter.target\")}"
+                                label { "{tr(&current_locale, \"notification-filter-target\")}"
                                     select {
                                         value: "{event_id()}",
                                         onchange: move |event| event_id.set(event.value()),
-                                        option { value: "", "{tr(&current_locale, \"notification.filter.all_targets\")}" }
+                                        option { value: "", "{tr(&current_locale, \"notification-filter-all_targets\")}" }
                                         for id in all_statuses.iter().map(|status| status.id.clone()) {
                                             option { key: "{id}", value: "{id}", "{id}" }
                                         }
                                     }
                                 }
-                                label { "{tr(&current_locale, \"notification.filter.event\")}"
+                                label { "{tr(&current_locale, \"notification-filter-event\")}"
                                     select {
                                         value: "{event_type()}",
                                         onchange: move |event| event_type.set(event.value()),
-                                        option { value: "", "{tr(&current_locale, \"notification.filter.all_events\")}" }
-                                        option { value: "changed", "{tr(&current_locale, \"notification.event.changed\")}" }
-                                        option { value: "poll_failed", "{tr(&current_locale, \"notification.event.poll_failed\")}" }
-                                        option { value: "poll_recovered", "{tr(&current_locale, \"notification.event.poll_recovered\")}" }
+                                        option { value: "", "{tr(&current_locale, \"notification-filter-all_events\")}" }
+                                        option { value: "changed", "{tr(&current_locale, \"notification-event-changed\")}" }
+                                        option { value: "poll_failed", "{tr(&current_locale, \"notification-event-poll_failed\")}" }
+                                        option { value: "poll_recovered", "{tr(&current_locale, \"notification-event-poll_recovered\")}" }
                                     }
                                 }
                                 button {
                                     disabled: visible_event_count == 0,
                                     onclick: move |_| download_csv("patrol-events.csv", &events_csv_content),
-                                    "{tr(&current_locale, \"notification.export_csv\")}"
+                                    "{tr(&current_locale, \"notification-export_csv\")}"
                                 }
                             }
                             div { class: "event-list", id: "events", aria_live: "polite", aria_relevant: "additions",
                                 if visible_events.is_empty() {
-                                    div { class: "empty", "{tr(&current_locale, \"notification.empty\")}" }
+                                    div { class: "empty", "{tr(&current_locale, \"notification-empty\")}" }
                                 }
                                 for event in visible_events {
                                     EventCard {
@@ -666,14 +627,14 @@ fn app() -> Element {
                     }
                     article { class: "card",
                         header { class: "card-head", div {
-                            h2 { "{tr(&current_locale, \"summary.title\")}" }
-                            p { "{tr(&current_locale, \"summary.current\")}" }
+                            h2 { "{tr(&current_locale, \"summary-title\")}" }
+                            p { "{tr(&current_locale, \"summary-current\")}" }
                         } }
                         div { class: "card-body",
                             div { class: "side-filters",
-                                SummaryLine { label: tr(&current_locale, "summary.healthy"), value: format_number(ok_count, &current_locale), class_name: "good" }
-                                SummaryLine { label: tr(&current_locale, "filter.status.failed"), value: format_number(failed_count, &current_locale), class_name: "bad" }
-                                SummaryLine { label: tr(&current_locale, "filter.status.not_checked"), value: format_number(unchecked_count, &current_locale), class_name: "muted" }
+                                SummaryLine { label: tr(&current_locale, "summary-healthy"), value: format_number(ok_count, &current_locale), class_name: "good" }
+                                SummaryLine { label: tr(&current_locale, "filter-status-failed"), value: format_number(failed_count, &current_locale), class_name: "bad" }
+                                SummaryLine { label: tr(&current_locale, "filter-status-not_checked"), value: format_number(unchecked_count, &current_locale), class_name: "muted" }
                             }
                         }
                     }
@@ -712,14 +673,14 @@ fn app() -> Element {
 fn StatusRow(status: DocStatus, locale: String, on_history: EventHandler<String>) -> Element {
     let status_class = format!("pill {}", status.status);
     let status_label = match status.status.as_str() {
-        "ok" => tr(&locale, "status.ok"),
+        "ok" => tr(&locale, "status-ok"),
         "failed" => tr_count(
             &locale,
-            "status.failed",
+            "status-failed",
             status.consecutive_failures as usize,
             &[],
         ),
-        _ => tr(&locale, "status.not_checked"),
+        _ => tr(&locale, "status-not_checked"),
     };
     let href = if status.url.starts_with("https://") || status.url.starts_with("http://") {
         Some(status.url.clone())
@@ -741,7 +702,7 @@ fn StatusRow(status: DocStatus, locale: String, on_history: EventHandler<String>
             td { "{format_time(status.last_success_unix_ms, &locale)}" }
             td { "{format_time(status.last_updated_unix_ms, &locale)}" }
             td { if let Some(error) = status.last_error { span { class: "error-text", "{error}" } } else { span { class: "muted", "—" } } }
-            td { button { class: "quiet", aria_label: "{tr_args(&locale, \"history.for_target\", &[(\"id\", status.id.clone())])}", onclick: move |_| on_history.call(status.id.clone()), "{tr(&locale, \"action.open\")}" } }
+            td { button { class: "quiet", aria_label: "{tr_args(&locale, \"history-for_target\", &[(\"id\", status.id.clone())])}", onclick: move |_| on_history.call(status.id.clone()), "{tr(&locale, \"action-open\")}" } }
         }
     }
 }
@@ -754,13 +715,13 @@ fn EventCard(event: DocUpdateInfo, locale: String, on_history: EventHandler<Stri
         _ => "event-card",
     };
     let label = match event.event.as_str() {
-        "poll_failed" => tr(&locale, "notification.event.poll_failed"),
-        "poll_recovered" => tr(&locale, "notification.event.poll_recovered"),
-        _ => tr(&locale, "notification.event.changed"),
+        "poll_failed" => tr(&locale, "notification-event-poll_failed"),
+        "poll_recovered" => tr(&locale, "notification-event-poll_recovered"),
+        _ => tr(&locale, "notification-event-changed"),
     };
     let heading = tr_args(
         &locale,
-        "notification.event_heading",
+        "notification-event_heading",
         &[("event", label.clone()), ("id", event.id.clone())],
     );
     let href = safe_http_url(&event.url);
@@ -772,9 +733,9 @@ fn EventCard(event: DocUpdateInfo, locale: String, on_history: EventHandler<Stri
             }
             if let Some(error) = event.error { p { class: "error-text", "{error}" } }
             div { class: "event-actions",
-                if let Some(href) = href { a { href: "{href}", target: "_blank", rel: "noopener noreferrer", "{tr(&locale, \"notification.open_target\")}" } }
+                if let Some(href) = href { a { href: "{href}", target: "_blank", rel: "noopener noreferrer", "{tr(&locale, \"notification-open_target\")}" } }
                 else { span { class: "muted", "{event.url}" } }
-                button { class: "quiet", onclick: move |_| on_history.call(event.id.clone()), "{tr(&locale, \"action.history\")}" }
+                button { class: "quiet", onclick: move |_| on_history.call(event.id.clone()), "{tr(&locale, \"action-history\")}" }
             }
         }
     }
@@ -809,19 +770,19 @@ fn HistoryDialog(
             section { class: "history-panel", role: "dialog", aria_modal: "true", aria_labelledby: "history-title",
                 header { class: "history-head",
                     div {
-                        h2 { id: "history-title", "{tr(&locale, \"history.title\")}" }
-                        p { "{tr_args(&locale, \"history.for_target\", &[(\"id\", id.clone())])}" }
+                        h2 { id: "history-title", "{tr(&locale, \"history-title\")}" }
+                        p { "{tr_args(&locale, \"history-for_target\", &[(\"id\", id.clone())])}" }
                     }
-                    button { class: "quiet", aria_label: "{tr(&locale, \"history.close\")}", onclick: move |event| on_close.call(event), "{tr(&locale, \"history.close\")}" }
+                    button { class: "quiet", aria_label: "{tr(&locale, \"history-close\")}", onclick: move |event| on_close.call(event), "{tr(&locale, \"history-close\")}" }
                 }
                 div { class: "history-content",
-                    if loading { div { class: "empty", "{tr(&locale, \"history.loading\")}" } }
+                    if loading { div { class: "empty", "{tr(&locale, \"history-loading\")}" } }
                     if let Some(error) = error {
-                        div { class: "empty", "{tr_args(&locale, \"history.fetch_error\", &[(\"error\", api_error_message(&locale, &error))])}" }
-                        button { onclick: move |event| on_retry.call(event), "{tr(&locale, \"history.retry\")}" }
+                        div { class: "empty", "{tr_args(&locale, \"history-fetch_error\", &[(\"error\", api_error_message(&locale, &error))])}" }
+                        button { onclick: move |event| on_retry.call(event), "{tr(&locale, \"history-retry\")}" }
                     }
                     if let Some(page) = page.as_ref() {
-                        if page.entries.is_empty() { div { class: "empty", "{tr(&locale, \"history.empty\")}" } }
+                        if page.entries.is_empty() { div { class: "empty", "{tr(&locale, \"history-empty\")}" } }
                         for entry in page.entries.iter() {
                             HistoryEntryView { key: "{entry.timestamp_unix_ms}", entry: entry.clone(), locale: locale.clone() }
                         }
@@ -829,13 +790,13 @@ fn HistoryDialog(
                 }
                 if let Some(page) = page.as_ref() {
                     footer { class: "history-controls",
-                        span { "{tr_count(&locale, \"history.page_range\", page.total, &[
+                        span { "{tr_count(&locale, \"history-page_range\", page.total, &[
                             (\"start\", format_number(page.offset + 1, &locale)),
                             (\"end\", format_number((page.offset + page.entries.len()).min(page.total), &locale)),
                         ])}" }
                         div {
-                            button { disabled: !page.has_newer || loading, onclick: move |_| on_page.call(newer_offset), "{tr(&locale, \"history.newer\")}" }
-                            button { disabled: !page.has_older || loading, onclick: move |_| on_page.call(older_offset), "{tr(&locale, \"history.older\")}" }
+                            button { disabled: !page.has_newer || loading, onclick: move |_| on_page.call(newer_offset), "{tr(&locale, \"history-newer\")}" }
+                            button { disabled: !page.has_older || loading, onclick: move |_| on_page.call(older_offset), "{tr(&locale, \"history-older\")}" }
                         }
                     }
                 }
@@ -847,16 +808,16 @@ fn HistoryDialog(
 #[component]
 fn HistoryEntryView(entry: ChangeHistoryEntry, locale: String) -> Element {
     let saved_content_label = if entry.content_truncated {
-        tr(&locale, "history.saved_content_truncated")
+        tr(&locale, "history-saved_content_truncated")
     } else {
-        tr(&locale, "history.saved_content")
+        tr(&locale, "history-saved_content")
     };
     rsx! {
         article { class: "history-entry",
             h3 { "{format_time(Some(entry.timestamp_unix_ms), &locale)}" }
             if let Some(previous) = entry.previous_content.as_deref() {
                 strong {
-                    if entry.previous_truncated || entry.content_truncated { "{tr(&locale, \"history.diff_truncated\")}" } else { "{tr(&locale, \"history.diff\")}" }
+                    if entry.previous_truncated || entry.content_truncated { "{tr(&locale, \"history-diff_truncated\")}" } else { "{tr(&locale, \"history-diff\")}" }
                 }
                 if let Some(lines) = history_diff(previous, &entry.content) {
                     pre { class: "history-diff",
@@ -865,14 +826,14 @@ fn HistoryEntryView(entry: ChangeHistoryEntry, locale: String) -> Element {
                         }
                     }
                 } else {
-                    p { class: "muted", "{tr(&locale, \"history.diff_too_large\")}" }
-                    strong { "{tr(&locale, \"history.before\")}" }
+                    p { class: "muted", "{tr(&locale, \"history-diff_too_large\")}" }
+                    strong { "{tr(&locale, \"history-before\")}" }
                     pre { "{previous}" }
-                    strong { "{tr(&locale, \"history.after\")}" }
+                    strong { "{tr(&locale, \"history-after\")}" }
                     pre { "{entry.content}" }
                 }
             } else {
-                p { class: "muted", "{tr(&locale, \"history.previous_missing\")}" }
+                p { class: "muted", "{tr(&locale, \"history-previous_missing\")}" }
                 strong { "{saved_content_label}" }
                 pre { "{entry.content}" }
             }

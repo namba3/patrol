@@ -47,7 +47,7 @@
 
 ## ビルドと実行
 
-UIの翻訳はui/locales/のJSONカタログで管理します。UIソース、翻訳、またはCSSを変更したら、Patrol本体の再ビルド前に./scripts/build_ui.shを実行してください。
+UIの翻訳はui/locales/のFluent（FTL）カタログで管理します。メッセージIDはハイフン区切りにし、引数は`{ $name }`、複数形は数値セレクターで記述します。日本語・英語のカタログを更新したら両方のメッセージIDを揃え、UIソース、翻訳、またはCSSを変更した場合はPatrol本体の再ビルド前に`./scripts/build_ui.sh`を実行してください。
 
 Rust 1.89以降のstable toolchainとDioxus CLI 0.7.10が必要です。UIを変更した場合は、Patrol本体のビルド前にDioxus UIを再バンドルしてください。
 
